@@ -36,14 +36,16 @@ def train_sr_model(model, dataloader, num_epochs=5, lr=1e-4):
 # Startpunkt
 if __name__ == "__main__":
     # === TEST-DATENPFAD ===
-    dicom_folder = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\CNNCoding\data\train\manifest-1724965242274\Spine-Mets-CT-SEG\10352\12-03-2011-NA-SpineSPINEBONESBRT Adult-55418\4.000000-SKINTOSKINSIM0.5MM10352a iMAR-32611"
+    dicom_folder = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\10352\12-03-2011-NA-SpineSPINEBONESBRT Adult-55418\4.000000-SKINTOSKINSIM0.5MM10352a iMAR-32611"
 
     # Dataset vorbereiten
-    dataset = CT_Dataset_SR(dicom_folder, max_slices=20)
+    #begrenzt auf 20 Slices dataset = CT_Dataset_SR(dicom_folder, max_slices=20)
+    dataset = CT_Dataset_SR(dicom_folder, scale_factor=2)
+    print(f"Anzahl Datensätze: {len(dataset)}")
     dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
 
     # Modell initialisieren
-    model = RRDBNet_CT()
+    model = RRDBNet_CT(scale=2)
 
     # Training starten
     trained_model = train_sr_model(model, dataloader, num_epochs=3)

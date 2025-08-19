@@ -4,6 +4,33 @@ import pydicom
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+import os, random
+from torch.utils.data import DataLoader, ConcatDataset
+from ct_dataset_loader import CT_Dataset_SR
+
+random.seed(42)
+
+# 1) Patienten-Ordner (Top-Level) finden
+root = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274"  # Root folder
+patient_dirs = [os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+random.shuffle(patient_dirs)
+
+# 2) Split patientenweise
+n = len(patient_dirs)
+train_dirs = patient_dirs[: int(0.8*n)]
+val_dirs   = patient_dirs[int(0.8*n): int(0.9*n)]
+test_dirs  = patient_dirs[int(0.9*n):]
+
+# 3) Je Split: ConcatDataset aus Patienten-Datasets
+train_ds = ConcatDataset([CT_Dataset_SR(d) for d in train_dirs])
+val_ds   = ConcatDataset([CT_Dataset_SR(d) for d in val_dirs])
+test_ds  = ConcatDataset([CT_Dataset_SR(d) for d in test_dirs])
+
+# 4) Dataloader – mischen für Training
+train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=4, pin_memory=True)
+val_loader   = DataLoader(val_ds, batch_size=2, shuffle=False)
+test_loader  = DataLoader(test_ds, batch_size=2, shuffle=False)
+
 
 def apply_window(img, center, width):
     min_val = center - width / 2
@@ -28,13 +55,13 @@ def load_dicom_as_tensor(path, window_center=40, window_width=400):
     tensor = torch.tensor(img).unsqueeze(0)  # [1, H, W]
     return tensor
 
-def downsample_tensor(tensor, scale_factor=4):
+def downsample_tensor(tensor, scale_factor=2):
     tensor = tensor.unsqueeze(0)  # [1, 1, H, W]
     ds = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False)
     return ds.squeeze(0)  # [1, H/s, W/s]
 
 class CT_Dataset_SR(Dataset):
-    def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=4, max_slices=None):
+    def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None):
         self.paths = find_dicom_files_recursively(dicom_folder)
         if max_slices:
             self.paths = self.paths[:max_slices]
@@ -50,10 +77,10 @@ class CT_Dataset_SR(Dataset):
         lr = downsample_tensor(hr, self.scale)
         return lr, hr
 
-# Beispiel:
+# Selbst-test-Beispiel:
 if __name__ == "__main__":
     dataset = CT_Dataset_SR(
-        r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\CNNCoding\data\train\manifest-1724965242274\Spine-Mets-CT-SEG\10352\12-03-2011-NA-SpineSPINEBONESBRT Adult-55418\4.000000-SKINTOSKINSIM0.5MM10352a iMAR-32611",
+        r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\10352\12-03-2011-NA-SpineSPINEBONESBRT Adult-55418\4.000000-SKINTOSKINSIM0.5MM10352a iMAR-32611",
         max_slices=20  # wir nehmen erstmal nur 20 Slices
     )
     print(f"Anzahl Bilder: {len(dataset)}")

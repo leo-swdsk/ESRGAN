@@ -61,7 +61,7 @@ def compare_methods(lr_tensor, hr_tensor, model):
 if __name__ == "__main__":
     # Dummydaten
     hr = torch.rand(1, 512, 512) * 2 - 1  # [-1, 1]
-    lr = F.interpolate(hr.unsqueeze(0), scale_factor=0.25, mode='bilinear', align_corners=False).squeeze(0)
+    lr = F.interpolate(hr.unsqueeze(0), scale_factor=0.5, mode='bilinear', align_corners=False).squeeze(0)
 
     from rrdb_ct_model import RRDBNet_CT
     model = RRDBNet_CT()

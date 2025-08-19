@@ -37,11 +37,11 @@ class RRDB(nn.Module):
 
 
 class RRDBNet_CT(nn.Module):
-    def __init__(self, in_nc=1, out_nc=1, nf=64, nb=23, gc=32, scale=4):
+    def __init__(self, in_nc=1, out_nc=1, nf=64, nb=23, gc=32, scale=2): # in_nc = 1-> 1 Input Channel, out_nc = 1-> 1 Output Channel, nf = 64-> 64 Feature Maps after first convolution, nb = 23-> 23 Residual Dense Blocks, gc = 32-> 32 Growth Channels, scale = 2-> 2 Upsampling Factor
         super().__init__()
         self.scale = scale
 
-        self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1)
+        self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1) # in_nc = 1-> 1 Input Channel, nf = 64-> 64 Feature Maps after first convolution, 3 = kernel size -> 3x3 , 1 = stride, 1 = padding
         self.RRDB_trunk = nn.Sequential(*[RRDB(nf, gc) for _ in range(nb)])
         self.trunk_conv = nn.Conv2d(nf, nf, 3, 1, 1)
 
@@ -58,9 +58,9 @@ class RRDBNet_CT(nn.Module):
         self.conv_last = nn.Conv2d(nf, out_nc, 3, 1, 1)
 
     def forward(self, x):
-        fea = self.conv_first(x)
-        trunk = self.trunk_conv(self.RRDB_trunk(fea))
-        fea = fea + trunk
-        out = self.upsampler(fea)
-        out = self.conv_last(out)
+        fea = self.conv_first(x) #Eingangsfeatures (64 Kanäle)
+        trunk = self.trunk_conv(self.RRDB_trunk(fea)) #durch die RRDB-Blöcke
+        fea = fea + trunk #Skip-Connection
+        out = self.upsampler(fea) #Upsampling
+        out = self.conv_last(out) #zurück zu 1 Kanal (CT)
         return out
