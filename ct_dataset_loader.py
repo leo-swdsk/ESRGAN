@@ -40,12 +40,41 @@ def apply_window(img, center, width):
     img = img * 2 - 1  # [-1,1]
     return img.astype(np.float32)
 
+
+def is_ct_image_dicom(path):
+    """
+    Returns True only for CT image storage objects. Skips DICOM SEG and any non-CT modalities.
+    Uses header-only read for speed and robustness.
+    """
+    try:
+        ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        modality = getattr(ds, 'Modality', '')
+        if modality != 'CT':
+            return False
+        sop_class = str(getattr(ds, 'SOPClassUID', ''))
+        allowed_sops = {
+            '1.2.840.10008.5.1.4.1.1.2',    # CT Image Storage
+            '1.2.840.10008.5.1.4.1.1.2.1',  # Enhanced CT Image Storage
+        }
+        # If SOPClassUID missing but modality CT, still accept to be lenient
+        return sop_class in allowed_sops or sop_class == ''
+    except Exception:
+        return False
+
+
 def find_dicom_files_recursively(base_folder):
     dicom_files = []
-    for root, _, files in os.walk(base_folder):
+    ignore_dirs = {'ctkDICOM-Database', '.git', '__pycache__'}
+    print(f"[CT-Loader] Scanning DICOMs under: {base_folder}")
+    for root, dirs, files in os.walk(base_folder):
+        # prune ignored directories in-place to avoid descending into them
+        dirs[:] = [d for d in dirs if d not in ignore_dirs]
         for f in files:
-            if f.lower().endswith(".dcm"):
-                dicom_files.append(os.path.join(root, f))
+            if f.lower().endswith('.dcm'):
+                path = os.path.join(root, f)
+                if is_ct_image_dicom(path):
+                    dicom_files.append(path)
+    print(f"[CT-Loader] Found {len(dicom_files)} CT image files")
     return sorted(dicom_files)
 
 def load_dicom_as_tensor(path, window_center=40, window_width=400):
@@ -68,6 +97,7 @@ class CT_Dataset_SR(Dataset):
         self.wc = window_center
         self.ww = window_width
         self.scale = scale_factor
+        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | window=({self.wc},{self.ww})")
 
     def __len__(self):
         return len(self.paths)
