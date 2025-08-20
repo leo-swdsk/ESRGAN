@@ -105,27 +105,33 @@ if __name__ == "__main__":
     random.seed(42)
 
     # Manifest-Root mit allen Patienten-Unterordnern
-    root = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274"
+    root = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG"
     patient_dirs = [os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
     if len(patient_dirs) == 0:
         raise RuntimeError(f"No patient directories found under {root}")
 
     random.shuffle(patient_dirs)
     n = len(patient_dirs)
-    train_dirs = patient_dirs[: int(0.8*n)]
-    val_dirs   = patient_dirs[int(0.8*n): int(0.9*n)]
+    # 70/15/15 patient-wise split using deterministic index cutoffs
+    train_cut = int(0.70 * n)
+    val_cut = int(0.85 * n)
+    train_dirs = patient_dirs[: train_cut]
+    val_dirs   = patient_dirs[train_cut: val_cut]
+    test_dirs  = patient_dirs[val_cut:]
 
-    print(f"[Split] Patients total={n} | train={len(train_dirs)} | val={len(val_dirs)}")
+    print(f"[Split] Patients total={n} | train={len(train_dirs)} | val={len(val_dirs)} | test={len(test_dirs)}")
 
     # Datasets zusammenfassen
     print("[Data] Building datasets ...")
     train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=2) for d in train_dirs])
     val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=2) for d in val_dirs])
+    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=2) for d in test_dirs])
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
     train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)
     val_loader   = DataLoader(val_ds, batch_size=4, shuffle=False, num_workers=2)
+    test_loader  = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=2)
 
     # Modell initialisieren
     print("[Init] Creating model RRDBNet_CT(scale=2) ...")
