@@ -26,6 +26,7 @@ def validate(model, dataloader, criterion, device):
     model.train()
     return total_loss / max(1, len(dataloader))
 
+#test für git
 
 # Trainingsfunktion
 def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, patience=5,
