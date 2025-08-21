@@ -4,6 +4,31 @@ import pydicom
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+import random
+#WGanze Slices laden bringt meistens kaum einen Vorteil und füllt den Speicher unnötig, deshalb kleinere zufällige Patches
+def random_aligned_crop(hr_tensor, lr_tensor, hr_patch=128, scale=2):
+    # hr_tensor: [1, H, W], lr_tensor: [1, H/2, W/2] bei scale=2
+    _, H, W = hr_tensor.shape
+    assert hr_patch % scale == 0, "hr_patch muss Vielfaches von scale sein"
+    lr_patch = hr_patch // scale
+
+    # sichere Grenzen
+    max_y_hr = H - hr_patch
+    max_x_hr = W - hr_patch
+    if max_y_hr < 0 or max_x_hr < 0:
+        # Falls das Bild kleiner als der Patch ist: auf ganze Slice zurückfallen
+        return lr_tensor, hr_tensor
+
+    # zufällige, scale-ausgerichtete Startpunkte
+    y_hr = random.randint(0, max_y_hr)
+    x_hr = random.randint(0, max_x_hr)
+    # LR-Koordinaten entsprechend skaliert
+    y_lr = y_hr // scale
+    x_lr = x_hr // scale
+
+    hr_crop = hr_tensor[:, y_hr:y_hr+hr_patch, x_hr:x_hr+hr_patch]
+    lr_crop = lr_tensor[:, y_lr:y_lr+lr_patch, x_lr:x_lr+lr_patch]
+    return lr_crop, hr_crop
 
 
 def apply_window(img, center, width):
@@ -77,14 +102,19 @@ class CT_Dataset_SR(Dataset):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        hr = load_dicom_as_tensor(self.paths[idx], self.wc, self.ww)
-        lr = downsample_tensor(hr, self.scale)
+        hr = load_dicom_as_tensor(self.paths[idx], self.wc, self.ww)   # [1, H, W]
+        lr = downsample_tensor(hr, self.scale)                         # [1, H/s, W/s]
+
+        # zufälliger, ausgerichteter Crop (z. B. 128 HR-Pixel)
+        lr, hr = random_aligned_crop(hr, lr, hr_patch=128, scale=self.scale)
         return lr, hr
+
 
 # Selbst-test-Beispiel:
 if __name__ == "__main__":
     dataset = CT_Dataset_SR(
-        r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG",
+        #r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG", #Laptop
+        r"C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG", #RTX4080 Super
         #max_slices=20  # wir nehmen erstmal nur 20 Slices
     )
     print(f"Anzahl Bilder: {len(dataset)}")

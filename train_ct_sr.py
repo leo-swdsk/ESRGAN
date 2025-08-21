@@ -8,21 +8,23 @@ import os
 import random
 import matplotlib.pyplot as plt
 from torch.utils.data import ConcatDataset
+from torch.cuda.amp import autocast, GradScaler
+from torch import amp
 
-
+#AMP (Automatic Mixed Precision) wird genutzt --> Operationen laufen intern in float16 und nicht 32, was Speicher spart
 def validate(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
         for lr_imgs, hr_imgs in dataloader:
-            lr_imgs = lr_imgs.to(device)
-            hr_imgs = hr_imgs.to(device)
-            preds = model(lr_imgs)
-            loss = criterion(preds, hr_imgs)
+            lr_imgs = lr_imgs.to(device, non_blocking=True) # Pytorch kann Transfer asynchron starten-->während die GPU noch rechnet, kann schon der nächste Batch kopiert werde 
+            hr_imgs = hr_imgs.to(device, non_blocking=True)
+            with amp.autocast('cuda'): #Tensor Cores rechnen in float16
+                preds = model(lr_imgs)
+                loss = criterion(preds, hr_imgs)
             total_loss += loss.item()
-    avg = total_loss / max(1, len(dataloader))
     model.train()
-    return avg
+    return total_loss / max(1, len(dataloader))
 
 
 # Trainingsfunktion
@@ -39,24 +41,29 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     epochs_no_improve = 0
     train_losses, val_losses = [], []
 
+    scaler = amp.GradScaler('cuda')
     for epoch in range(num_epochs):
         model.train()
         total_train = 0.0
-        print(f"[Train] Epoch {epoch+1}/{num_epochs}")
         for batch_idx, (lr_imgs, hr_imgs) in enumerate(train_loader, start=1):
-            lr_imgs = lr_imgs.to(device)
-            hr_imgs = hr_imgs.to(device)
+            lr_imgs = lr_imgs.to(device, non_blocking=True)
+            hr_imgs = hr_imgs.to(device, non_blocking=True)
 
-            preds = model(lr_imgs)
-            loss = criterion(preds, hr_imgs)
+            optimizer.zero_grad(set_to_none=True) # Gradienten nicht 0, sondern None -> weniger Speicherzugriffe
+            with autocast():
+                preds = model(lr_imgs)
+                loss = criterion(preds, hr_imgs)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_train += loss.item()
             if batch_idx % 50 == 0:
                 print(f"  [Batch {batch_idx}/{len(train_loader)}] train L1={loss.item():.5f}")
+            # (optional) Speicher aufräumen:
+            del preds, loss
+        torch.cuda.empty_cache()
 
         avg_train = total_train / max(1, len(train_loader))
         avg_val = validate(model, val_loader, criterion, device)
@@ -105,7 +112,8 @@ if __name__ == "__main__":
     random.seed(42)
 
     # Manifest-Root mit allen Patienten-Unterordnern
-    root = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG"
+    #root = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG"
+    root = r"C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" #RTX4080 Super
     patient_dirs = [os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
     if len(patient_dirs) == 0:
         raise RuntimeError(f"No patient directories found under {root}")
@@ -129,9 +137,10 @@ if __name__ == "__main__":
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
-    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(val_ds, batch_size=4, shuffle=False, num_workers=2)
-    test_loader  = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True, persistent_workers=True) # spart Reinitialisiierung der WOrker zwischen den Epochen
+    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2)
+    test_loader  = DataLoader(test_ds,  batch_size=2, shuffle=False, num_workers=2)
+
 
     # Modell initialisieren
     print("[Init] Creating model RRDBNet_CT(scale=2) ...")
