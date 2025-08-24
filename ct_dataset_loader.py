@@ -89,14 +89,17 @@ def downsample_tensor(tensor, scale_factor=2):
     return ds.squeeze(0)  # [1, H/s, W/s]
 
 class CT_Dataset_SR(Dataset):
-    def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None):
+    def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None,
+                 do_random_crop=True, hr_patch=128):
         self.paths = find_dicom_files_recursively(dicom_folder)
         if max_slices:
             self.paths = self.paths[:max_slices]
         self.wc = window_center
         self.ww = window_width
         self.scale = scale_factor
-        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | window=({self.wc},{self.ww})")
+        self.do_random_crop = do_random_crop
+        self.hr_patch = hr_patch
+        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | window=({self.wc},{self.ww}) | random_crop={self.do_random_crop}")
 
     def __len__(self):
         return len(self.paths)
@@ -105,8 +108,9 @@ class CT_Dataset_SR(Dataset):
         hr = load_dicom_as_tensor(self.paths[idx], self.wc, self.ww)   # [1, H, W]
         lr = downsample_tensor(hr, self.scale)                         # [1, H/s, W/s]
 
-        # zufälliger, ausgerichteter Crop (z. B. 128 HR-Pixel)
-        lr, hr = random_aligned_crop(hr, lr, hr_patch=128, scale=self.scale)
+        # optionaler zufälliger, ausgerichteter Crop (z. B. 128 HR-Pixel)
+        if self.do_random_crop and self.hr_patch is not None:
+            lr, hr = random_aligned_crop(hr, lr, hr_patch=self.hr_patch, scale=self.scale)
         return lr, hr
 
 

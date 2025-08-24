@@ -132,9 +132,10 @@ if __name__ == "__main__":
 
     # Datasets zusammenfassen
     print("[Data] Building datasets ...")
-    train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=2) for d in train_dirs])
-    val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=2) for d in val_dirs])
-    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=2) for d in test_dirs])
+    # Train auf zufälligen, ausgerichteten Patches; Val/Test auf ganzen Slices (typisch 512x512)
+    train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=True, hr_patch=128) for d in train_dirs])
+    val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False) for d in val_dirs])
+    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False) for d in test_dirs])
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
