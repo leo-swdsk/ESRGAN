@@ -3,6 +3,7 @@ import csv
 import json
 import random
 import argparse
+import math
 from collections import defaultdict
 
 import torch
@@ -38,7 +39,7 @@ def ensure_dir(path):
 
 
 def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda', scale=2, preset='soft_tissue',
-                   max_patients=None, max_slices_per_patient=None):
+                   max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42):
     ensure_dir(output_dir)
 
     # Prepare model
@@ -64,6 +65,8 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     rows = []
     patient_to_method_metrics = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
+    rng = random.Random(seed)
+
     with torch.no_grad():
         for p_idx, patient_dir in enumerate(patient_dirs):
             patient_id = os.path.basename(patient_dir)
@@ -73,7 +76,17 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             num_slices = len(ds)
             limit_slices = min(num_slices, max_slices_per_patient) if max_slices_per_patient else num_slices
 
-            for s_idx in range(limit_slices):
+            # choose slice indices according to sampling strategy
+            if limit_slices >= num_slices:
+                indices = list(range(num_slices))
+            else:
+                if slice_sampling == 'first':
+                    indices = list(range(limit_slices))
+                else:  # 'random'
+                    indices = rng.sample(range(num_slices), k=limit_slices)
+                    indices.sort()
+
+            for s_idx in indices:
                 lr, hr = ds[s_idx]
                 results = compare_methods(lr, hr, model)
 
@@ -99,10 +112,11 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
     # Aggregate statistics
     def mean_std(values):
-        if len(values) == 0:
+        finite_vals = [v for v in values if math.isfinite(v)]
+        if len(finite_vals) == 0:
             return 0.0, 0.0
-        m = sum(values) / len(values)
-        var = sum((v - m) ** 2 for v in values) / max(1, (len(values) - 1))
+        m = sum(finite_vals) / len(finite_vals)
+        var = sum((v - m) ** 2 for v in finite_vals) / max(1, (len(finite_vals) - 1))
         return m, var ** 0.5
 
     # Per-slice global aggregation
@@ -157,8 +171,22 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         'per_patient': per_patient_summary,
         'patient_level_aggregate': patient_level_agg
     }
+    # Sanitize JSON (replace inf/nan with strings) for strict JSON compatibility
+    def sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [sanitize(v) for v in obj]
+        if isinstance(obj, float):
+            if math.isfinite(obj):
+                return obj
+            if math.isinf(obj):
+                return 'inf'
+            return 'nan'
+        return obj
+
     with open(json_path, 'w') as f:
-        json.dump(summary, f, indent=2)
+        json.dump(sanitize(summary), f, indent=2, allow_nan=False)
 
     print(f"[Eval] Wrote per-slice CSV to: {csv_path}")
     print(f"[Eval] Wrote summary JSON to: {json_path}")
@@ -175,6 +203,8 @@ def main():
     parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset (for completeness)')
     parser.add_argument('--max_patients', type=int, default=None, help='Optional limit of patients for a quick run')
     parser.add_argument('--max_slices_per_patient', type=int, default=None, help='Optional limit of slices per patient for a quick run')
+    parser.add_argument('--slice_sampling', type=str, default='random', choices=['first', 'random'], help='How to select slices when limited')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducible sampling')
     args = parser.parse_args()
 
     evaluate_split(
@@ -186,7 +216,9 @@ def main():
         scale=args.scale,
         preset=args.preset,
         max_patients=args.max_patients,
-        max_slices_per_patient=args.max_slices_per_patient
+        max_slices_per_patient=args.max_slices_per_patient,
+        slice_sampling=args.slice_sampling,
+        seed=args.seed
     )
 
 

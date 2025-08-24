@@ -1,5 +1,6 @@
 # folder
 .vscode
+eval_results/
 
 # file type
 *.svg
