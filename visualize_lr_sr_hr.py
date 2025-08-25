@@ -135,18 +135,17 @@ class ViewerLRSRHR:
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         self.enable_selector()
-        # Custom ROI toggle button to avoid toolbar conflicts
+        # Custom Reset ROI button (bottom-left)
         from matplotlib.widgets import Button
-        axbtn = self.fig.add_axes([0.01, 0.92, 0.06, 0.05])
-        self.btn_roi = Button(axbtn, 'ROI')
-        def toggle_roi(event):
-            # Toggle RectangleSelector activation
-            if self.selector is not None:
-                state = not getattr(self.selector, 'active', True)
-                self.selector.set_active(state)
-                print(f"[ROI Button] RectangleSelector active={state}")
-        self.btn_roi.on_clicked(toggle_roi)
-        print('[Hint] Use ROI button (or drag on HR) to select region; press r to reset')
+        axbtn = self.fig.add_axes([0.01, 0.02, 0.10, 0.05])
+        self.btn_roi = Button(axbtn, 'Reset ROI')
+        def reset_roi_click(event):
+            self.roi = None
+            self.hide_roi_overlay()
+            print('[ROI Button] Reset ROI')
+            self.update()
+        self.btn_roi.on_clicked(reset_roi_click)
+        print('[Hint] Drag on HR to select ROI; use Reset ROI button or press r to reset')
         # sync to toolbar zoom/pan on all axes
         for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic, self.ax_lr]:
             ax.callbacks.connect('xlim_changed', self.on_axes_limits_change)
@@ -308,7 +307,7 @@ class ViewerLRSRHR:
         if event.key in ['r', 'R']:
             # reset ROI and re-enable selector
             self.roi = None
-            self.enable_selector()
+            self.hide_roi_overlay()
             self.update()
 
     def enable_selector(self):
@@ -340,6 +339,7 @@ class ViewerLRSRHR:
             self.roi = (x0n, y0n, x1n, y1n)
             print(f"[RectangleSelector] ROI HR: ({x0n}, {y0n}, {x1n}, {y1n}) | mapped LR: ({x0n/self.scale:.2f}, {y0n/self.scale:.2f}, {x1n/self.scale:.2f}, {y1n/self.scale:.2f})")
             # Sync axes to ROI immediately
+            self.hide_roi_overlay()
             self.apply_axes_limits(x0n, y0n, x1n, y1n)
             self.update()
 
@@ -350,6 +350,16 @@ class ViewerLRSRHR:
             spancoords='pixels'
         )
         self.selector.set_active(True)
+
+    def hide_roi_overlay(self):
+        # Remove any red rectangle artifacts from previous selector draws
+        try:
+            for attr in ['to_draw', 'artists']:
+                if hasattr(self.selector, attr):
+                    for artist in getattr(self.selector, attr):
+                        artist.set_visible(False)
+        except Exception:
+            pass
 
     def on_axes_limits_change(self, ax):
         # Sync other axes when any view is zoomed/panned; compute ROI in HR coords
