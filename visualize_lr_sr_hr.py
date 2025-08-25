@@ -22,9 +22,12 @@ def apply_window_np(img, center, width):
     return img.astype(np.float32)
 
 
-def load_ct_volume(folder_path, preset="soft_tissue"):
+def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
     window = WINDOW_PRESETS.get(preset, WINDOW_PRESETS["default"])
-    wl, ww = window["center"], window["width"]
+    if override_window is not None:
+        wl, ww = override_window
+    else:
+        wl, ww = window["center"], window["width"]
 
     slice_list = []
     for root, _, files in os.walk(folder_path):
@@ -91,13 +94,18 @@ def build_sr_volume_from_lr(lr_volume, model):
 
 
 class ViewerLRSRHR:
-    def __init__(self, lr_volume, sr_volume, hr_volume, scale=2, lin_volume=None, bic_volume=None):
+    def __init__(self, lr_volume, sr_volume, hr_volume, scale=2, lin_volume=None, bic_volume=None, *,
+                 dicom_folder=None, preset_name="soft_tissue", model=None, device=None):
         self.lr = lr_volume
         self.sr = sr_volume
         self.hr = hr_volume
         self.lin = lin_volume
         self.bic = bic_volume
         self.scale = scale
+        self.dicom_folder = dicom_folder
+        self.preset_name = preset_name
+        self.model = model
+        self.device = device
         D, _, _, _ = self.hr.shape
         self.index = D // 2
         print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
@@ -136,8 +144,8 @@ class ViewerLRSRHR:
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         self.enable_selector()
         # Custom Reset ROI button (bottom-left)
-        from matplotlib.widgets import Button
-        axbtn = self.fig.add_axes([0.01, 0.02, 0.10, 0.05])
+        from matplotlib.widgets import Button, TextBox, RadioButtons
+        axbtn = self.fig.add_axes([0.01, 0.02, 0.12, 0.06])
         self.btn_roi = Button(axbtn, 'Reset ROI')
         def reset_roi_click(event):
             self.roi = None
@@ -145,7 +153,29 @@ class ViewerLRSRHR:
             print('[ROI Button] Reset ROI')
             self.update()
         self.btn_roi.on_clicked(reset_roi_click)
-        print('[Hint] Drag on HR to select ROI; use Reset ROI button or press r to reset')
+        # Preset selection (radio buttons)
+        preset_labels = list(WINDOW_PRESETS.keys())
+        ax_radio = self.fig.add_axes([0.01, 0.14, 0.12, 0.40])
+        self.radio_presets = RadioButtons(ax_radio, preset_labels, active=preset_labels.index(self.preset_name) if self.preset_name in preset_labels else 0)
+        def on_preset(label):
+            self.apply_new_window(preset=label)
+        self.radio_presets.on_clicked(on_preset)
+        # Text boxes for WL/WW and apply
+        ax_wl = self.fig.add_axes([0.15, 0.02, 0.10, 0.06])
+        ax_ww = self.fig.add_axes([0.27, 0.02, 0.10, 0.06])
+        self.txt_wl = TextBox(ax_wl, 'WL', initial=str(WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['center']))
+        self.txt_ww = TextBox(ax_ww, 'WW', initial=str(WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['width']))
+        ax_apply = self.fig.add_axes([0.39, 0.02, 0.12, 0.06])
+        self.btn_apply = Button(ax_apply, 'Apply WW')
+        def apply_manual(event):
+            try:
+                wl = float(self.txt_wl.text)
+                ww = float(self.txt_ww.text)
+                self.apply_new_window(center=wl, width=ww)
+            except Exception as e:
+                print(f"[Apply WW] Invalid WL/WW input: {e}")
+        self.btn_apply.on_clicked(apply_manual)
+        print('[Hint] Drag on HR to select ROI; use Reset ROI button or press r to reset; change presets or set WL/WW and click Apply')
         # sync to toolbar zoom/pan on all axes
         for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic, self.ax_lr]:
             ax.callbacks.connect('xlim_changed', self.on_axes_limits_change)
@@ -405,6 +435,42 @@ class ViewerLRSRHR:
         finally:
             self._is_syncing = False
 
+    def apply_new_window(self, preset=None, center=None, width=None):
+        # Reload volumes with new window and rebuild derived volumes
+        if self.dicom_folder is None or self.model is None:
+            print('[Window] Missing dicom_folder or model; cannot rewindow')
+            return
+        if preset is not None:
+            self.preset_name = preset
+            override = None
+        else:
+            override = (center, width)
+        print(f"[Window] Rebuilding with preset={self.preset_name} override={override}")
+        new_hr = load_ct_volume(self.dicom_folder, preset=self.preset_name, override_window=override)
+        new_lr = build_lr_volume_from_hr(new_hr, scale=self.scale)
+        # model inference per slice
+        new_sr = build_sr_volume_from_lr(new_lr, self.model)
+        # linear/bicubic upscales for comparison
+        new_lin = F.interpolate(new_lr, scale_factor=(self.scale, self.scale), mode='bilinear', align_corners=False)
+        new_bic = F.interpolate(new_lr, scale_factor=(self.scale, self.scale), mode='bicubic', align_corners=False)
+        # swap and reset ROI
+        self.hr, self.lr, self.sr, self.lin, self.bic = new_hr, new_lr, new_sr, new_lin, new_bic
+        self.roi = None
+        self.hide_roi_overlay()
+        # keep index within bounds
+        D = self.hr.shape[0]
+        self.index = int(np.clip(self.index, 0, D-1))
+        # refresh WL/WW textbox to reflect current settings if coming from preset
+        if preset is not None:
+            wl = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['center']
+            ww = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['width']
+            try:
+                self.txt_wl.set_val(str(wl))
+                self.txt_ww.set_val(str(ww))
+            except Exception:
+                pass
+        self.update()
+
     def compute_metrics(self, sr_plane_t, hr_plane_t):
         # Inputs are torch tensors in [-1,1]
         sr_np = sr_plane_t.detach().cpu().numpy()
@@ -447,7 +513,8 @@ def main():
     lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
     bic_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bicubic', align_corners=False)
 
-    viewer = ViewerLRSRHR(lr_vol, sr_vol, hr_vol, scale=args.scale, lin_volume=lin_vol, bic_volume=bic_vol)
+    viewer = ViewerLRSRHR(lr_vol, sr_vol, hr_vol, scale=args.scale, lin_volume=lin_vol, bic_volume=bic_vol,
+                          dicom_folder=args.dicom_folder, preset_name=args.preset, model=model, device=device)
     print('Scroll with mouse wheel to navigate slices')
     plt.show()
 
