@@ -2,6 +2,7 @@
 
 import os
 from load_ct_tensor import load_ct_as_tensor
+import torch
 
 def load_folder_as_tensor_stack(folder_path, preset="soft_tissue"):
     tensor_stack = []

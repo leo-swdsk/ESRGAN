@@ -5,6 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import random
+from pydicom.pixel_data_handlers.util import apply_modality_lut
 #WGanze Slices laden bringt meistens kaum einen Vorteil und füllt den Speicher unnötig, deshalb kleinere zufällige Patches
 def random_aligned_crop(hr_tensor, lr_tensor, hr_patch=128, scale=2):
     # hr_tensor: [1, H, W], lr_tensor: [1, H/2, W/2] bei scale=2
@@ -76,21 +77,40 @@ def find_dicom_files_recursively(base_folder):
     print(f"[CT-Loader] Found {len(dicom_files)} CT image files")
     return sorted(dicom_files)
 
-def load_dicom_as_tensor(path, window_center=40, window_width=400):
-    ds = pydicom.dcmread(path)
-    img = ds.pixel_array.astype(np.float32)
-    img = apply_window(img, window_center, window_width)
+def load_dicom_as_tensor(path, normalization='global', hu_clip=(-1000, 2000), window_center=40, window_width=400):
+    """
+    Load a DICOM slice as a normalized tensor [1,H,W].
+    - Applies Modality LUT (RescaleSlope/Intercept) to obtain HU when present.
+    - normalization='global': clip to hu_clip (default [-1000,2000]) and scale to [-1,1].
+    - normalization='window': apply window_center/width to scale to [-1,1] (legacy behavior).
+    """
+    ds = pydicom.dcmread(path, force=True)
+    arr = ds.pixel_array
+    try:
+        hu = apply_modality_lut(arr, ds).astype(np.float32)
+    except Exception:
+        hu = arr.astype(np.float32)
+
+    if normalization == 'window':
+        img = apply_window(hu, window_center, window_width)
+    else:
+        lo, hi = hu_clip
+        img = np.clip(hu, lo, hi)
+        img = (img - lo) / (hi - lo)  # [0,1]
+        img = img * 2 - 1             # [-1,1]
+        img = img.astype(np.float32)
+
     tensor = torch.tensor(img).unsqueeze(0)  # [1, H, W]
     return tensor
 
 def downsample_tensor(tensor, scale_factor=2):
     tensor = tensor.unsqueeze(0)  # [1, 1, H, W]
-    ds = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False)
+    ds = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False, antialias=True)
     return ds.squeeze(0)  # [1, H/s, W/s]
 
 class CT_Dataset_SR(Dataset):
     def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None,
-                 do_random_crop=True, hr_patch=128):
+                 do_random_crop=True, hr_patch=128, normalization='global', hu_clip=(-1000, 2000)):
         self.paths = find_dicom_files_recursively(dicom_folder)
         if max_slices:
             self.paths = self.paths[:max_slices]
@@ -99,13 +119,20 @@ class CT_Dataset_SR(Dataset):
         self.scale = scale_factor
         self.do_random_crop = do_random_crop
         self.hr_patch = hr_patch
-        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | window=({self.wc},{self.ww}) | random_crop={self.do_random_crop}")
+        self.normalization = normalization  # 'global' (default) or 'window'
+        self.hu_clip = hu_clip
+        if self.normalization == 'global':
+            norm_desc = f"global_HU_clip={self.hu_clip}"
+        else:
+            norm_desc = f"window=({self.wc},{self.ww})"
+        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | norm={norm_desc} | random_crop={self.do_random_crop}")
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        hr = load_dicom_as_tensor(self.paths[idx], self.wc, self.ww)   # [1, H, W]
+        hr = load_dicom_as_tensor(self.paths[idx], normalization=self.normalization, hu_clip=self.hu_clip,
+                                   window_center=self.wc, window_width=self.ww)   # [1, H, W]
         lr = downsample_tensor(hr, self.scale)                         # [1, H/s, W/s]
 
         # optionaler zufälliger, ausgerichteter Crop (z. B. 128 HR-Pixel)

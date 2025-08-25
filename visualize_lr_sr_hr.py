@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import pydicom
 import math
+from pydicom.pixel_data_handlers.util import apply_modality_lut
 
 from window_presets import WINDOW_PRESETS
 from ct_dataset_loader import is_ct_image_dicom
@@ -40,12 +41,13 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
             try:
                 ds = pydicom.dcmread(path, force=True)
                 arr = ds.pixel_array
-                if arr.ndim == 2:
-                    img = apply_window_np(arr, wl, ww)
+                hu = apply_modality_lut(arr, ds).astype(np.float32)
+                if hu.ndim == 2:
+                    img = apply_window_np(hu, wl, ww)
                     slice_list.append(torch.tensor(img).unsqueeze(0))
-                elif arr.ndim == 3:
-                    for k in range(arr.shape[0]):
-                        img = apply_window_np(arr[k], wl, ww)
+                elif hu.ndim == 3:
+                    for k in range(hu.shape[0]):
+                        img = apply_window_np(hu[k], wl, ww)
                         slice_list.append(torch.tensor(img).unsqueeze(0))
             except Exception:
                 continue
@@ -78,7 +80,7 @@ def map_index_between_hr_lr(hr_index, hr_shape, lr_shape):
 
 def build_lr_volume_from_hr(hr_volume, scale=2):
 	# Per-slice bilinear interpolation: treat D as batch dimension
-	return F.interpolate(hr_volume, scale_factor=(1.0/scale, 1.0/scale), mode='bilinear', align_corners=False)
+	return F.interpolate(hr_volume, scale_factor=(1.0/scale, 1.0/scale), mode='bilinear', align_corners=False, antialias=True)
 
 
 def build_sr_volume_from_lr(lr_volume, model):

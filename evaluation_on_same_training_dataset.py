@@ -13,7 +13,8 @@ dataset = CT_Dataset_SR(
     r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG",
     max_slices=100, 
     scale_factor=2,
-    do_random_crop=False
+    do_random_crop=False,
+    normalization='global'
 )
 
 # Teste die ersten 5 Bilder

@@ -130,14 +130,14 @@ if __name__ == "__main__":
     # Datasets zusammenfassen
     print("[Data] Building datasets ...")
     # Train auf zufälligen, ausgerichteten Patches; Val/Test auf ganzen Slices (typisch 512x512)
-    train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=True, hr_patch=128) for d in train_dirs])
-    val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False) for d in val_dirs])
-    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False) for d in test_dirs])
+    train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=True, hr_patch=192, normalization='global', hu_clip=(-1000, 2000)) for d in train_dirs])
+    val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in val_dirs])
+    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in test_dirs])
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
-    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True, persistent_workers=True) # spart Reinitialisiierung der WOrker zwischen den Epochen
-    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True, persistent_workers=True) # spart Reinitialisiierung der WOrker zwischen den Epochen
+    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2) #bewusst kleinere Batchgröße, da hier ganze Slices verwendet werden
     test_loader  = DataLoader(test_ds,  batch_size=2, shuffle=False, num_workers=2)
 
 

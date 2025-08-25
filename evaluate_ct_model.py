@@ -72,7 +72,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             patient_id = os.path.basename(patient_dir)
 
             # Full-slice dataset for evaluation (no random crop)
-            ds = CT_Dataset_SR(patient_dir, scale_factor=scale, do_random_crop=False)
+            ds = CT_Dataset_SR(patient_dir, scale_factor=scale, do_random_crop=False, normalization='global',)
             num_slices = len(ds)
             limit_slices = min(num_slices, max_slices_per_patient) if max_slices_per_patient else num_slices
 
