@@ -8,7 +8,6 @@ import os
 import random
 import matplotlib.pyplot as plt
 from torch.utils.data import ConcatDataset
-from torch.cuda.amp import autocast, GradScaler
 from torch import amp
 
 #AMP (Automatic Mixed Precision) wird genutzt --> Operationen laufen intern in float16 und nicht 32, was Speicher spart
@@ -25,8 +24,6 @@ def validate(model, dataloader, criterion, device):
             total_loss += loss.item()
     model.train()
     return total_loss / max(1, len(dataloader))
-
-#test für git
 
 # Trainingsfunktion
 def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, patience=5,
@@ -51,7 +48,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
             hr_imgs = hr_imgs.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True) # Gradienten nicht 0, sondern None -> weniger Speicherzugriffe
-            with autocast():
+            with amp.autocast('cuda'):
                 preds = model(lr_imgs)
                 loss = criterion(preds, hr_imgs)
 

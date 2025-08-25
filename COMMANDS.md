@@ -34,6 +34,11 @@ python visualize_lr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarbeit
 python visualize_lr_sr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\<Patientenordner>" --model_path rrdb_ct_best.pth --device cuda --preset soft_tissue
 ```
 
+- Patientenaufteilung ansehen (Metadaten: Zuordnung zur Gruppe, Id, Anzahl der Slices, MOdalität und Gerät, Schichtdicke und Pixel-Spacing), wichtig: gleichen Seed beachten:
+  ```bash
+python dump_patient_split.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --seed 42 
+```
+
 ### Schnelltest (Legacy ESRGAN RGB, optional)
 - Test der Original-ESRGAN-Demo (RGB, nicht CT-spezifisch)
 ```bash

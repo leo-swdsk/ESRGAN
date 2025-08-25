@@ -4,29 +4,54 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import pydicom
+import math
 
-from load_ct_tensor import load_ct_as_tensor
+from window_presets import WINDOW_PRESETS
+from ct_dataset_loader import is_ct_image_dicom
 from rrdb_ct_model import RRDBNet_CT
+from skimage.metrics import structural_similarity as ssim
 
 
-def find_dicom_files_recursively(base_folder):
-    dicom_files = []
-    for root, _, files in os.walk(base_folder):
-        for f in files:
-            if f.lower().endswith('.dcm'):
-                dicom_files.append(os.path.join(root, f))
-    return sorted(dicom_files)
+def apply_window_np(img, center, width):
+    min_val = center - width / 2.0
+    max_val = center + width / 2.0
+    img = np.clip(img.astype(np.float32), min_val, max_val)
+    img = (img - min_val) / (max_val - min_val)
+    img = img * 2.0 - 1.0
+    return img.astype(np.float32)
 
 
-def load_volume(folder_path, preset="soft_tissue"):
-    paths = find_dicom_files_recursively(folder_path)
-    tensors = []
-    for p in paths:
-        t = load_ct_as_tensor(p, preset=preset)  # [1,H,W], values in [-1,1]
-        tensors.append(t)
-    if len(tensors) == 0:
-        raise RuntimeError(f"No DICOM files found under {folder_path}")
-    vol = torch.stack(tensors, dim=0)  # [D,1,H,W]
+def load_ct_volume(folder_path, preset="soft_tissue"):
+    window = WINDOW_PRESETS.get(preset, WINDOW_PRESETS["default"])
+    wl, ww = window["center"], window["width"]
+
+    slice_list = []
+    for root, _, files in os.walk(folder_path):
+        for f in sorted(files):
+            if not f.lower().endswith('.dcm'):
+                continue
+            path = os.path.join(root, f)
+            if not is_ct_image_dicom(path):
+                continue
+            try:
+                ds = pydicom.dcmread(path, force=True)
+                arr = ds.pixel_array
+                if arr.ndim == 2:
+                    img = apply_window_np(arr, wl, ww)
+                    slice_list.append(torch.tensor(img).unsqueeze(0))
+                elif arr.ndim == 3:
+                    for k in range(arr.shape[0]):
+                        img = apply_window_np(arr[k], wl, ww)
+                        slice_list.append(torch.tensor(img).unsqueeze(0))
+            except Exception:
+                continue
+
+    if len(slice_list) == 0:
+        raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
+    H, W = slice_list[0].shape[-2:]
+    slice_list = [s for s in slice_list if s.shape[-2:] == (H, W)]
+    vol = torch.stack(slice_list, dim=0)
     return vol
 
 
@@ -36,48 +61,21 @@ def to_display(img_tensor):
     return img
 
 
-def extract_plane(volume, orientation, index):
-    D, _, H, W = volume.shape
-    if orientation == 'axial':
-        index = int(np.clip(index, 0, D - 1))
-        plane = volume[index, 0, :, :]
-        axis_len = D
-    elif orientation == 'coronal':
-        index = int(np.clip(index, 0, H - 1))
-        plane = volume[:, 0, index, :]
-        axis_len = H
-    elif orientation == 'sagittal':
-        index = int(np.clip(index, 0, W - 1))
-        plane = volume[:, 0, :, index]
-        axis_len = W
-    else:
-        raise ValueError('orientation must be one of axial|coronal|sagittal')
-    return plane, axis_len, index
+def extract_slice(volume, index):
+    D, _, _, _ = volume.shape
+    index = int(np.clip(index, 0, D - 1))
+    return volume[index, 0, :, :], D, index
 
 
-def map_index_between_hr_lr(hr_index, orientation, hr_shape, lr_shape):
-    D_hr, H_hr, W_hr = hr_shape
-    D_lr, H_lr, W_lr = lr_shape
-    if orientation == 'axial':
-        return int(np.clip(hr_index, 0, D_lr - 1))
-    elif orientation == 'coronal':
-        if H_hr <= 1:
-            return 0
-        return int(round(hr_index * (H_lr - 1) / (H_hr - 1)))
-    elif orientation == 'sagittal':
-        if W_hr <= 1:
-            return 0
-        return int(round(hr_index * (W_lr - 1) / (W_hr - 1)))
-    else:
-        return hr_index
+def map_index_between_hr_lr(hr_index, hr_shape, lr_shape):
+    D_hr, _, _, _ = hr_shape
+    D_lr, _, _, _ = lr_shape
+    return int(np.clip(hr_index, 0, min(D_hr, D_lr) - 1))
 
 
 def build_lr_volume_from_hr(hr_volume, scale=2):
-	D, C, H, W = hr_volume.shape
-	vol5 = hr_volume.permute(1, 0, 2, 3).unsqueeze(0)  # [1,1,D,H,W]
-	lr5 = F.interpolate(vol5, scale_factor=(1.0, 1.0/scale, 1.0/scale), mode='trilinear', align_corners=False)
-	lr = lr5.squeeze(0).permute(1, 0, 2, 3)  # [D,1,H/scale,W/scale]
-	return lr
+	# Per-slice bilinear interpolation: treat D as batch dimension
+	return F.interpolate(hr_volume, scale_factor=(1.0/scale, 1.0/scale), mode='bilinear', align_corners=False)
 
 
 def build_sr_volume_from_lr(lr_volume, model):
@@ -93,137 +91,354 @@ def build_sr_volume_from_lr(lr_volume, model):
 
 
 class ViewerLRSRHR:
-    def __init__(self, lr_volume, sr_volume, hr_volume):
+    def __init__(self, lr_volume, sr_volume, hr_volume, scale=2, lin_volume=None, bic_volume=None):
         self.lr = lr_volume
         self.sr = sr_volume
         self.hr = hr_volume
-        D, _, H, W = self.hr.shape
-        self.orientation = 'axial'
+        self.lin = lin_volume
+        self.bic = bic_volume
+        self.scale = scale
+        D, _, _, _ = self.hr.shape
         self.index = D // 2
+        print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
+        if self.lin is not None:
+            print(f"[Viewer] LIN={tuple(self.lin.shape)}")
+        if self.bic is not None:
+            print(f"[Viewer] BIC={tuple(self.bic.shape)}")
 
-        self.fig, self.axes = plt.subplots(1, 3, figsize=(16, 6))
-        self.ax_lr, self.ax_sr, self.ax_hr = self.axes
+        # Axes: LR | Linear | Bicubic | SR | HR
+        self.fig, self.axes = plt.subplots(1, 5, figsize=(22, 6))
+        self.ax_lr, self.ax_lin, self.ax_bic, self.ax_sr, self.ax_hr = self.axes
         self.ax_lr.set_title('LR')
+        self.ax_lin.set_title('Linear x{}'.format(scale))
+        self.ax_bic.set_title('Bicubic x{}'.format(scale))
         self.ax_sr.set_title('SR (model)')
         self.ax_hr.set_title('HR')
         for ax in self.axes:
             ax.axis('off')
+            ax.set_aspect('equal')
 
         self.im_lr = None
+        self.im_lin = None
+        self.im_bic = None
         self.im_sr = None
         self.im_hr = None
         self.text = self.fig.text(0.5, 0.02, '', ha='center', va='bottom')
+        self.text_stats = self.fig.text(0.5, 0.97, '', ha='center', va='top')
+        self.metric_texts = []
 
+        self.roi = None  # (x0,y0,x1,y1) in HR coordinate space
+        self.selector = None
+        self._is_syncing = False  # guard to prevent recursive axis callbacks
+        self._images_ready = False  # defer axis sync until images initialized
+
+        self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
-        self.fig.canvas.mpl_connect('button_press_event', self.on_click)
+        self.enable_selector()
+        # Custom ROI toggle button to avoid toolbar conflicts
+        from matplotlib.widgets import Button
+        axbtn = self.fig.add_axes([0.01, 0.92, 0.06, 0.05])
+        self.btn_roi = Button(axbtn, 'ROI')
+        def toggle_roi(event):
+            # Toggle RectangleSelector activation
+            if self.selector is not None:
+                state = not getattr(self.selector, 'active', True)
+                self.selector.set_active(state)
+                print(f"[ROI Button] RectangleSelector active={state}")
+        self.btn_roi.on_clicked(toggle_roi)
+        print('[Hint] Use ROI button (or drag on HR) to select region; press r to reset')
+        # sync to toolbar zoom/pan on all axes
+        for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic, self.ax_lr]:
+            ax.callbacks.connect('xlim_changed', self.on_axes_limits_change)
+            ax.callbacks.connect('ylim_changed', self.on_axes_limits_change)
         self.update()
 
     def update(self):
-        D_hr, _, H_hr, W_hr = self.hr.shape
-        D_lr, _, H_lr, W_lr = self.lr.shape
+        D_hr, _, _, _ = self.hr.shape
+        D_lr, _, _, _ = self.lr.shape
+        D_sr, _, _, _ = self.sr.shape
+        D_lin = self.lin.shape[0] if self.lin is not None else D_sr
+        D_bic = self.bic.shape[0] if self.bic is not None else D_sr
 
-        hr_plane, axis_len, clamped_idx = extract_plane(self.hr, self.orientation, self.index)
-        lr_index = map_index_between_hr_lr(clamped_idx, self.orientation, (D_hr, H_hr, W_hr), (D_lr, H_lr, W_lr))
-        lr_plane, _, _ = extract_plane(self.lr, self.orientation, lr_index)
-        sr_plane, _, _ = extract_plane(self.sr, self.orientation, clamped_idx)  # SR matches HR resolution
+        clamped_idx = int(np.clip(self.index, 0, min(D_hr, D_lr, D_sr, D_lin, D_bic) - 1))
+        print(f"[Viewer.update] index={clamped_idx} / D={min(D_hr, D_lr, D_sr, D_lin, D_bic)}")
+
+        hr_plane, axis_len, _ = extract_slice(self.hr, clamped_idx)
+        lr_plane, _, _ = extract_slice(self.lr, clamped_idx)
+        sr_plane, _, _ = extract_slice(self.sr, clamped_idx)
+        lin_plane = None
+        bic_plane = None
+        if self.lin is not None:
+            lin_plane, _, _ = extract_slice(self.lin, clamped_idx)
+        if self.bic is not None:
+            bic_plane, _, _ = extract_slice(self.bic, clamped_idx)
+        print(f"[Viewer.update] shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} LIN={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is None else tuple(bic_plane.shape)}")
+
+        # If ROI is set (in HR coords), synchronize axes limits across views
+        if self.roi:
+            x0, y0, x1, y1 = self.roi
+            self.apply_axes_limits(x0, y0, x1, y1)
 
         img_lr = to_display(lr_plane)
         img_sr = to_display(sr_plane)
         img_hr = to_display(hr_plane)
+        img_lin = to_display(lin_plane) if lin_plane is not None else np.zeros_like(img_hr)
+        img_bic = to_display(bic_plane) if bic_plane is not None else np.zeros_like(img_hr)
+        print(f"[Viewer.update] ranges LR=({img_lr.min():.3f},{img_lr.max():.3f}) SR=({img_sr.min():.3f},{img_sr.max():.3f}) HR=({img_hr.min():.3f},{img_hr.max():.3f})")
 
         if self.im_lr is None:
-            self.im_lr = self.ax_lr.imshow(img_lr, cmap='gray', vmin=0, vmax=1)
+            self.im_lr = self.ax_lr.imshow(img_lr, cmap='gray', vmin=0, vmax=1, origin='lower')
         else:
             self.im_lr.set_data(img_lr)
+        if self.im_lin is None:
+            self.im_lin = self.ax_lin.imshow(img_lin, cmap='gray', vmin=0, vmax=1, origin='lower')
+        else:
+            self.im_lin.set_data(img_lin)
+        if self.im_bic is None:
+            self.im_bic = self.ax_bic.imshow(img_bic, cmap='gray', vmin=0, vmax=1, origin='lower')
+        else:
+            self.im_bic.set_data(img_bic)
         if self.im_sr is None:
-            self.im_sr = self.ax_sr.imshow(img_sr, cmap='gray', vmin=0, vmax=1)
+            self.im_sr = self.ax_sr.imshow(img_sr, cmap='gray', vmin=0, vmax=1, origin='lower')
         else:
             self.im_sr.set_data(img_sr)
         if self.im_hr is None:
-            self.im_hr = self.ax_hr.imshow(img_hr, cmap='gray', vmin=0, vmax=1)
+            self.im_hr = self.ax_hr.imshow(img_hr, cmap='gray', vmin=0, vmax=1, origin='lower')
         else:
             self.im_hr.set_data(img_hr)
 
-        self.text.set_text(f'Orientation: {self.orientation} | Index: {clamped_idx+1}/{axis_len}')
+        self.text.set_text(f'Index: {clamped_idx+1}/{axis_len}')
+
+        # If no ROI is active, ensure axes show full images explicitly
+        if not self.roi:
+            h_lr, w_lr = img_lr.shape
+            h_hr, w_hr = img_hr.shape
+            self._is_syncing = True
+            try:
+                self.ax_lr.set_xlim(-0.5, w_lr-0.5); self.ax_lr.set_ylim(h_lr-0.5, -0.5)
+                for ax in [self.ax_lin, self.ax_bic, self.ax_sr, self.ax_hr]:
+                    ax.set_xlim(-0.5, w_hr-0.5); ax.set_ylim(h_hr-0.5, -0.5)
+            finally:
+                self._is_syncing = False
+
+        # Determine ROI arrays for metrics (crop if ROI exists) using non-displayed tensors to avoid previous crops
+        x0i = y0i = x1i = y1i = None
+        H, W = self.hr.shape[-2:]
+        if self.roi:
+            x0, y0, x1, y1 = self.roi
+            x0i, x1i = int(round(max(0, min(x0, W-1)))), int(round(max(0, min(x1, W))))
+            y0i, y1i = int(round(max(0, min(y0, H-1)))), int(round(max(0, min(y1, H))))
+
+        def crop_roi_full(vol):
+            t = vol[clamped_idx, 0]
+            if self.roi and x1i is not None and x1i > x0i and y1i > y0i:
+                return t[y0i:y1i, x0i:x1i]
+            return t
+
+        hr_for_metrics = crop_roi_full(self.hr)
+        sr_for_metrics = crop_roi_full(self.sr)
+        lin_for_metrics = crop_roi_full(self.lin) if self.lin is not None else hr_for_metrics
+        bic_for_metrics = crop_roi_full(self.bic) if self.bic is not None else hr_for_metrics
+
+        metrics = {}
+        metrics['SR'] = self.compute_metrics(sr_for_metrics, hr_for_metrics)
+        if lin_for_metrics is not None:
+            metrics['Linear'] = self.compute_metrics(lin_for_metrics, hr_for_metrics)
+        if bic_for_metrics is not None:
+            metrics['Bicubic'] = self.compute_metrics(bic_for_metrics, hr_for_metrics)
+
+        # Clear previous metric texts
+        for t in self.metric_texts:
+            try:
+                t.remove()
+            except Exception:
+                pass
+        self.metric_texts = []
+
+        # Find best per metric (MSE/RMSE min, PSNR/SSIM max) across all methods present
+        names = list(metrics.keys())
+        by_metric = {'MSE': {}, 'RMSE': {}, 'PSNR': {}, 'SSIM': {}}
+        for name in names:
+            mse_val, rmse_val, psnr_val, ssim_val = metrics[name]
+            by_metric['MSE'][name] = mse_val
+            by_metric['RMSE'][name] = rmse_val
+            by_metric['PSNR'][name] = psnr_val
+            by_metric['SSIM'][name] = ssim_val
+        print(f"[Viewer.update] metrics: {metrics}")
+        best = {
+            'MSE': min(by_metric['MSE'], key=by_metric['MSE'].get),
+            'RMSE': min(by_metric['RMSE'], key=by_metric['RMSE'].get),
+            'PSNR': max(by_metric['PSNR'], key=by_metric['PSNR'].get),
+            'SSIM': max(by_metric['SSIM'], key=by_metric['SSIM'].get),
+        }
+
+        # Layout metric lines under each other (three full rows with all values, best ones green)
+        y0_text = 0.97
+        dy = 0.045
+        for i, name in enumerate(['SR', 'Linear', 'Bicubic']):
+            if name not in metrics:
+                continue
+            mse_val, rmse_val, psnr_val, ssim_val = metrics[name]
+            # create separate text artists to color best values
+            x_start = 0.02
+            y = y0_text - i*dy
+            label = self.fig.text(x_start, y, f"{name}:", ha='left', va='top', family='monospace', color='black')
+            self.metric_texts.append(label)
+            # columns
+            def add_val(x, txt, is_best):
+                color = 'green' if is_best else 'black'
+                self.metric_texts.append(self.fig.text(x, y, txt, ha='left', va='top', color=color, family='monospace'))
+            add_val(0.12, f"MSE={mse_val:.6f}", name == best['MSE'])
+            add_val(0.32, f"RMSE={rmse_val:.6f}", name == best['RMSE'])
+            add_val(0.52, f"PSNR={psnr_val:.2f}dB", name == best['PSNR'])
+            add_val(0.72, f"SSIM={ssim_val:.4f}", name == best['SSIM'])
+        self._images_ready = True
         self.fig.canvas.draw_idle()
 
-    def on_key(self, event):
-        step = 1
-        if event.key in ['right', 'down', 'j']:
-            self.index += step
-        elif event.key in ['left', 'up', 'k']:
-            self.index -= step
-        elif event.key in ['a']:
-            self.orientation = 'axial'
-            D, _, _, _ = self.hr.shape
-            self.index = np.clip(self.index, 0, D - 1)
-        elif event.key in ['c']:
-            self.orientation = 'coronal'
-            _, _, H, _ = self.hr.shape
-            self.index = np.clip(self.index, 0, H - 1)
-        elif event.key in ['s']:
-            self.orientation = 'sagittal'
-            _, _, _, W = self.hr.shape
-            self.index = np.clip(self.index, 0, W - 1)
+    def on_scroll(self, event):
+        step = 1 if getattr(event, 'step', 0) >= 0 else -1
+        if event.button == 'up':
+            step = 1
+        elif event.button == 'down':
+            step = -1
+        self.index += step
         self.update()
 
-    def on_click(self, event):
-        if event.inaxes not in [self.ax_lr, self.ax_sr, self.ax_hr]:
+    def on_key(self, event):
+        if event.key in ['r', 'R']:
+            # reset ROI and re-enable selector
+            self.roi = None
+            self.enable_selector()
+            self.update()
+
+    def enable_selector(self):
+        from matplotlib.widgets import RectangleSelector
+        # Create selector on HR axes to define ROI in HR coordinates
+        if self.selector is not None:
+            try:
+                self.selector.disconnect_events()
+            except Exception:
+                pass
+            self.selector = None
+
+        def onselect(eclick, erelease):
+            x0, y0 = eclick.xdata, eclick.ydata
+            x1, y1 = erelease.xdata, erelease.ydata
+            if x0 is None or y0 is None or x1 is None or y1 is None:
+                return
+            # Normalize and clip to integer pixel indices of HR
+            H, W = self.hr.shape[-2:]
+            x0n, x1n = (x0, x1) if x0 <= x1 else (x1, x0)
+            y0n, y1n = (y0, y1) if y0 <= y1 else (y1, y0)
+            x0n = max(0, min(int(round(x0n)), W-1))
+            x1n = max(0, min(int(round(x1n)), W))
+            y0n = max(0, min(int(round(y0n)), H-1))
+            y1n = max(0, min(int(round(y1n)), H))
+            # enforce minimum size to avoid empty ROI
+            if x1n <= x0n + 1 or y1n <= y0n + 1:
+                return
+            self.roi = (x0n, y0n, x1n, y1n)
+            print(f"[RectangleSelector] ROI HR: ({x0n}, {y0n}, {x1n}, {y1n}) | mapped LR: ({x0n/self.scale:.2f}, {y0n/self.scale:.2f}, {x1n/self.scale:.2f}, {y1n/self.scale:.2f})")
+            # Sync axes to ROI immediately
+            self.apply_axes_limits(x0n, y0n, x1n, y1n)
+            self.update()
+
+        self.selector = RectangleSelector(
+            self.ax_hr, onselect,
+            useblit=True, button=[1],  # left mouse drag
+            minspanx=5, minspany=5, interactive=True,
+            spancoords='pixels'
+        )
+        self.selector.set_active(True)
+
+    def on_axes_limits_change(self, ax):
+        # Sync other axes when any view is zoomed/panned; compute ROI in HR coords
+        if self._is_syncing or not self._images_ready:
             return
-        if event.inaxes is self.ax_lr:
-            self.show_triplanar(self.lr, 'LR')
-        elif event.inaxes is self.ax_sr:
-            self.show_triplanar(self.sr, 'SR')
+        x0, x1 = ax.get_xlim(); y0, y1 = ax.get_ylim()
+        # ignore spurious callbacks with tiny height/width (e.g., during init)
+        if (x1 - x0) < 5 or (y1 - y0) < 5:
+            return
+        # map LR axes to HR coordinates via scale
+        if ax is self.ax_lr:
+            fx = float(self.scale); fy = float(self.scale)
+            xr0, xr1 = x0*fx, x1*fx
+            yr0, yr1 = y0*fy, y1*fy
         else:
-            self.show_triplanar(self.hr, 'HR')
+            xr0, xr1 = x0, x1
+            yr0, yr1 = y0, y1
+        # store ROI in HR coordinates; normalize to ascending
+        xr0, xr1 = (xr0, xr1) if xr0 < xr1 else (xr1, xr0)
+        yr0, yr1 = (yr0, yr1) if yr0 < yr1 else (yr1, yr0)
+        self.roi = (xr0, yr0, xr1, yr1)
+        print(f"[AxesChanged] src={ax.get_title()} xlim=({x0:.1f},{x1:.1f}) ylim=({y0:.1f},{y1:.1f}) -> HR ROI={self.roi}")
+        self.apply_axes_limits(xr0, yr0, xr1, yr1)
+        self.update()
 
-    def show_triplanar(self, volume, title_prefix):
-        D, _, H, W = volume.shape
-        if self.orientation == 'axial':
-            z = int(np.clip(self.index, 0, D - 1))
-            y = H // 2
-            x = W // 2
-        elif self.orientation == 'coronal':
-            z = D // 2
-            y = int(np.clip(self.index, 0, H - 1))
-            x = W // 2
+    def apply_axes_limits(self, x0, y0, x1, y1):
+        # Apply HR ROI to SR/LIN/BIC axes; map to LR via scale
+        if x1 <= x0 or y1 <= y0:
+            return
+        try:
+            self._is_syncing = True
+            # Set HR/SR/LIN/BIC limits directly in HR coords
+            for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic]:
+                if ax is not None:
+                    ax.set_xlim(x0-0.5, x1-0.5)
+                    ax.set_ylim(y1-0.5, y0-0.5)
+            # LR mapping with scale
+            fx = float(self.scale)
+            fy = float(self.scale)
+            self.ax_lr.set_xlim(x0/fx-0.5, x1/fx-0.5)
+            self.ax_lr.set_ylim(y1/fy-0.5, y0/fy-0.5)
+            print(f"[ApplyLimits] HR=({x0},{y0})-({x1},{y1}) | LR=({x0/fx:.2f},{y0/fy:.2f})-({x1/fx:.2f},{y1/fy:.2f})")
+        finally:
+            self._is_syncing = False
+
+    def compute_metrics(self, sr_plane_t, hr_plane_t):
+        # Inputs are torch tensors in [-1,1]
+        sr_np = sr_plane_t.detach().cpu().numpy()
+        hr_np = hr_plane_t.detach().cpu().numpy()
+        sr_np = ((sr_np + 1.0) / 2.0).clip(0.0, 1.0)
+        hr_np = ((hr_np + 1.0) / 2.0).clip(0.0, 1.0)
+        diff = (hr_np.astype(np.float64) - sr_np.astype(np.float64))
+        mse_val = float(np.mean(diff * diff))
+        rmse_val = float(math.sqrt(mse_val))
+        if mse_val <= 0.0:
+            psnr_val = float('inf')
         else:
-            z = D // 2
-            y = H // 2
-            x = int(np.clip(self.index, 0, W - 1))
-
-        axial = to_display(volume[z, 0])
-        coronal = to_display(volume[:, 0, y, :])
-        sagittal = to_display(volume[:, 0, :, x])
-
-        fig, axs = plt.subplots(1, 3, figsize=(12, 4))
-        axs[0].imshow(axial, cmap='gray', vmin=0, vmax=1); axs[0].set_title(f'{title_prefix} Axial (z={z})'); axs[0].axis('off')
-        axs[1].imshow(coronal, cmap='gray', vmin=0, vmax=1); axs[1].set_title(f'{title_prefix} Coronal (y={y})'); axs[1].axis('off')
-        axs[2].imshow(sagittal, cmap='gray', vmin=0, vmax=1); axs[2].set_title(f'{title_prefix} Sagittal (x={x})'); axs[2].axis('off')
-        fig.suptitle(f'Tri-planar views ({title_prefix})')
-        fig.tight_layout()
-        plt.show()
+            psnr_val = float(10.0 * math.log10(1.0 / mse_val))
+        try:
+            ssim_val = float(ssim(hr_np, sr_np, data_range=1.0))
+        except Exception:
+            ssim_val = float('nan')
+        return mse_val, rmse_val, psnr_val, ssim_val
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Visualize LR vs SR vs HR CT slices with orientation control')
+    parser = argparse.ArgumentParser(description='Visualize LR vs SR vs HR CT slices with mouse-wheel scrolling')
     parser.add_argument('--dicom_folder', type=str, required=True, help='Root folder containing DICOM series')
-    parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset (soft_tissue, lung, bone, brain, liver, abdomen, default)')
-    parser.add_argument('--model_path', type=str, default='rrdb_ct_trained.pth', help='Path to trained model weights')
+    parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset')
+    parser.add_argument('--model_path', type=str, default='rrdb_ct_best.pth', help='Path to trained model weights')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
+    parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device=='cuda' else 'cpu')
-    model = RRDBNet_CT(scale=2).to(device)
+    model = RRDBNet_CT(scale=args.scale).to(device)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
-    hr_vol = load_volume(args.dicom_folder, preset=args.preset)   # [D,1,H,W]
-    lr_vol = build_lr_volume_from_hr(hr_vol, scale=2)             # [D,1,H/2,W/2]
-    sr_vol = build_sr_volume_from_lr(lr_vol, model)               # [D,1,H,W]
+    hr_vol = load_ct_volume(args.dicom_folder, preset=args.preset)
+    lr_vol = build_lr_volume_from_hr(hr_vol, scale=args.scale)
+    sr_vol = build_sr_volume_from_lr(lr_vol, model)
+    # Also build linear and bicubic upscales of LR to HR size for side-by-side comparison
+    # Treat D as batch, use bilinear/bicubic per slice
+    lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
+    bic_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bicubic', align_corners=False)
 
-    viewer = ViewerLRSRHR(lr_vol, sr_vol, hr_vol)
-    print('Controls: a=axial, c=coronal, s=sagittal | left/right/up/down or j/k to change slice | click image for tri-planar view')
+    viewer = ViewerLRSRHR(lr_vol, sr_vol, hr_vol, scale=args.scale, lin_volume=lin_vol, bic_volume=bic_vol)
+    print('Scroll with mouse wheel to navigate slices')
     plt.show()
 
 
