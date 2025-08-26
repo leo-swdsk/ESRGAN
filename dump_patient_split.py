@@ -3,13 +3,17 @@ import json
 import argparse
 import random
 import platform
-from datetime import datetime
-
+from datetime import datetime, timezone
 import torch
 import pydicom
 
 from evaluate_ct_model import split_patients, get_patient_dirs
 from ct_dataset_loader import is_ct_image_dicom
+
+try:
+    UTC = datetime.UTC          # Python 3.11+
+except AttributeError:
+    UTC = timezone.utc          # ältere Python-Versionen
 
 
 def count_ct_slices_silent(patient_dir):
@@ -96,7 +100,7 @@ def dump_split(root_folder, seed=42, output_path=None):
     # Compose payload
     payload = {
         'meta': {
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
             'root': root_folder,
             'seed': seed,
             'device': device,
