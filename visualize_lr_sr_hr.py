@@ -31,6 +31,9 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
         wl, ww = window["center"], window["width"]
 
     slice_list = []
+    slice_paths = []
+    
+    # Sammle alle DICOM-Dateien und ihre Pfade
     for root, _, files in os.walk(folder_path):
         for f in sorted(files):
             if not f.lower().endswith('.dcm'):
@@ -38,25 +41,40 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
             path = os.path.join(root, f)
             if not is_ct_image_dicom(path):
                 continue
-            try:
-                ds = pydicom.dcmread(path, force=True)
-                arr = ds.pixel_array
-                hu = apply_modality_lut(arr, ds).astype(np.float32)
-                if hu.ndim == 2:
-                    img = apply_window_np(hu, wl, ww)
+            slice_paths.append(path)
+    
+    # Sortiere die Pfade, um konsistente Reihenfolge zu gewährleisten
+    slice_paths.sort()
+    
+    # Lade die Slices in der sortierten Reihenfolge
+    for path in slice_paths:
+        try:
+            ds = pydicom.dcmread(path, force=True)
+            arr = ds.pixel_array
+            hu = apply_modality_lut(arr, ds).astype(np.float32)
+            if hu.ndim == 2:
+                img = apply_window_np(hu, wl, ww)
+                slice_list.append(torch.tensor(img).unsqueeze(0))
+            elif hu.ndim == 3:
+                for k in range(hu.shape[0]):
+                    img = apply_window_np(hu[k], wl, ww)
                     slice_list.append(torch.tensor(img).unsqueeze(0))
-                elif hu.ndim == 3:
-                    for k in range(hu.shape[0]):
-                        img = apply_window_np(hu[k], wl, ww)
-                        slice_list.append(torch.tensor(img).unsqueeze(0))
-            except Exception:
-                continue
+        except Exception:
+            continue
 
     if len(slice_list) == 0:
         raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
+    
     H, W = slice_list[0].shape[-2:]
     slice_list = [s for s in slice_list if s.shape[-2:] == (H, W)]
+    
+    # Kehre die Schichtreihenfolge um: erste geladene Schicht wird höchster Index
+    slice_list.reverse()
+    
+    # Erstelle das Volumen - erste geladene Schicht wird höchster Index (wie in Slicer 3D)
     vol = torch.stack(slice_list, dim=0)
+    
+    print(f"[CT-Loader] Loaded {vol.shape[0]} slices with dimensions {vol.shape[1:]} (Index 0 = last loaded slice, Index {vol.shape[0]-1} = first loaded slice)")
     return vol
 
 
@@ -75,6 +93,7 @@ def extract_slice(volume, index):
 def map_index_between_hr_lr(hr_index, hr_shape, lr_shape):
     D_hr, _, _, _ = hr_shape
     D_lr, _, _, _ = lr_shape
+    # Beide Volumen haben die gleiche Anzahl Schichten, Index 0-basiert
     return int(np.clip(hr_index, 0, min(D_hr, D_lr) - 1))
 
 
@@ -109,7 +128,7 @@ class ViewerLRSRHR:
         self.model = model
         self.device = device
         D, _, _, _ = self.hr.shape
-        self.index = D // 2
+        self.index = 0  # Start bei Index 0 (erste Schicht)
         print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
         if self.lin is not None:
             print(f"[Viewer] LIN={tuple(self.lin.shape)}")
@@ -177,7 +196,7 @@ class ViewerLRSRHR:
             except Exception as e:
                 print(f"[Apply WW] Invalid WL/WW input: {e}")
         self.btn_apply.on_clicked(apply_manual)
-        print('[Hint] Drag on HR to select ROI; use Reset ROI button or press r to reset; change presets or set WL/WW and click Apply')
+        print('[Hint] Navigation: Mouse wheel or arrow keys; Home/End for first/last loaded slice; Drag on HR to select ROI; press r to reset ROI; change presets or set WL/WW and click Apply')
         # sync to toolbar zoom/pan on all axes
         for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic, self.ax_lr]:
             ax.callbacks.connect('xlim_changed', self.on_axes_limits_change)
@@ -192,7 +211,7 @@ class ViewerLRSRHR:
         D_bic = self.bic.shape[0] if self.bic is not None else D_sr
 
         clamped_idx = int(np.clip(self.index, 0, min(D_hr, D_lr, D_sr, D_lin, D_bic) - 1))
-        print(f"[Viewer.update] index={clamped_idx} / D={min(D_hr, D_lr, D_sr, D_lin, D_bic)}")
+        print(f"[Viewer.update] index={clamped_idx} / D={min(D_hr, D_lr, D_sr, D_lin, D_bic)} (0 = last loaded slice, {min(D_hr, D_lr, D_sr, D_lin, D_bic)-1} = first loaded slice)")
 
         hr_plane, axis_len, _ = extract_slice(self.hr, clamped_idx)
         lr_plane, _, _ = extract_slice(self.lr, clamped_idx)
@@ -203,7 +222,7 @@ class ViewerLRSRHR:
             lin_plane, _, _ = extract_slice(self.lin, clamped_idx)
         if self.bic is not None:
             bic_plane, _, _ = extract_slice(self.bic, clamped_idx)
-        print(f"[Viewer.update] shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} LIN={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is None else tuple(bic_plane.shape)}")
+        print(f"[Viewer.update] Slice {clamped_idx}/{axis_len-1} | shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} LIN={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is None else tuple(bic_plane.shape)}")
 
         # If ROI is set (in HR coords), synchronize axes limits across views
         if self.roi:
@@ -238,7 +257,7 @@ class ViewerLRSRHR:
         else:
             self.im_hr.set_data(img_hr)
 
-        self.text.set_text(f'Index: {clamped_idx+1}/{axis_len}')
+        self.text.set_text(f'Index: {clamped_idx}/{axis_len-1}')
 
         # If no ROI is active, ensure axes show full images explicitly
         if not self.roi:
@@ -286,19 +305,21 @@ class ViewerLRSRHR:
                 pass
         self.metric_texts = []
 
-        # Find best per metric (MSE/RMSE min, PSNR/SSIM max) across all methods present
+       # Find best per metric (MSE/RMSE/MAE min, PSNR/SSIM max) across all methods present
         names = list(metrics.keys())
-        by_metric = {'MSE': {}, 'RMSE': {}, 'PSNR': {}, 'SSIM': {}}
+        by_metric = {'MSE': {}, 'RMSE': {}, 'MAE': {}, 'PSNR': {}, 'SSIM': {}}  # MAE hinzugefügt
         for name in names:
-            mse_val, rmse_val, psnr_val, ssim_val = metrics[name]
+            mse_val, rmse_val, mae_val, psnr_val, ssim_val = metrics[name]  # MAE hinzugefügt
             by_metric['MSE'][name] = mse_val
             by_metric['RMSE'][name] = rmse_val
+            by_metric['MAE'][name] = mae_val  # MAE hinzugefügt
             by_metric['PSNR'][name] = psnr_val
             by_metric['SSIM'][name] = ssim_val
         print(f"[Viewer.update] metrics: {metrics}")
         best = {
             'MSE': min(by_metric['MSE'], key=by_metric['MSE'].get),
             'RMSE': min(by_metric['RMSE'], key=by_metric['RMSE'].get),
+            'MAE': min(by_metric['MAE'], key=by_metric['MAE'].get),  # MAE hinzugefügt
             'PSNR': max(by_metric['PSNR'], key=by_metric['PSNR'].get),
             'SSIM': max(by_metric['SSIM'], key=by_metric['SSIM'].get),
         }
@@ -309,20 +330,21 @@ class ViewerLRSRHR:
         for i, name in enumerate(['SR', 'Linear', 'Bicubic']):
             if name not in metrics:
                 continue
-            mse_val, rmse_val, psnr_val, ssim_val = metrics[name]
+            mse_val, rmse_val, mae_val, psnr_val, ssim_val = metrics[name]  # MAE hinzugefügt
             # create separate text artists to color best values
             x_start = 0.02
             y = y0_text - i*dy
             label = self.fig.text(x_start, y, f"{name}:", ha='left', va='top', family='monospace', color='black')
             self.metric_texts.append(label)
-            # columns
+            # columns - jetzt 5 Metriken
             def add_val(x, txt, is_best):
                 color = 'green' if is_best else 'black'
                 self.metric_texts.append(self.fig.text(x, y, txt, ha='left', va='top', color=color, family='monospace'))
-            add_val(0.12, f"MSE={mse_val:.6f}", name == best['MSE'])
-            add_val(0.32, f"RMSE={rmse_val:.6f}", name == best['RMSE'])
-            add_val(0.52, f"PSNR={psnr_val:.2f}dB", name == best['PSNR'])
-            add_val(0.72, f"SSIM={ssim_val:.4f}", name == best['SSIM'])
+            add_val(0.10, f"MSE={mse_val:.6f}", name == best['MSE'])
+            add_val(0.25, f"RMSE={rmse_val:.6f}", name == best['RMSE'])
+            add_val(0.40, f"MAE={mae_val:.6f}", name == best['MAE'])  # MAE hinzugefügt
+            add_val(0.55, f"PSNR={psnr_val:.2f}dB", name == best['PSNR'])
+            add_val(0.70, f"SSIM={ssim_val:.4f}", name == best['SSIM'])
         self._images_ready = True
         self.fig.canvas.draw_idle()
 
@@ -332,7 +354,10 @@ class ViewerLRSRHR:
             step = 1
         elif event.button == 'down':
             step = -1
+        old_index = self.index
         self.index += step
+        D, _, _, _ = self.hr.shape
+        print(f"[Scroll] Slice {old_index} -> {self.index} (0 = last loaded slice, {D-1} = first loaded slice)")
         self.update()
 
     def on_key(self, event):
@@ -341,6 +366,30 @@ class ViewerLRSRHR:
             self.roi = None
             self.hide_roi_overlay()
             self.update()
+        elif event.key == 'home':
+            # Go to first loaded slice (höchster Index)
+            D, _, _, _ = self.hr.shape
+            self.index = D - 1
+            print(f"[Key] Home -> Slice {D-1} (first loaded slice)")
+            self.update()
+        elif event.key == 'end':
+            # Go to last loaded slice (Index 0)
+            self.index = 0
+            print(f"[Key] End -> Slice 0 (last loaded slice)")
+            self.update()
+        elif event.key in ['left', 'up']:
+            # Previous slice (höherer Index)
+            D, _, _, _ = self.hr.shape
+            if self.index < D - 1:
+                self.index += 1
+                print(f"[Key] Previous -> Slice {self.index}")
+                self.update()
+        elif event.key in ['right', 'down']:
+            # Next slice (niedrigerer Index)
+            if self.index > 0:
+                self.index -= 1
+                print(f"[Key] Next -> Slice {self.index}")
+                self.update()
 
     def enable_selector(self):
         from matplotlib.widgets import RectangleSelector
@@ -462,6 +511,7 @@ class ViewerLRSRHR:
         # keep index within bounds
         D = self.hr.shape[0]
         self.index = int(np.clip(self.index, 0, D-1))
+        print(f"[Window] Reset index to {self.index} (0 = last loaded slice, {D-1} = first loaded slice)")
         # refresh WL/WW textbox to reflect current settings if coming from preset
         if preset is not None:
             wl = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['center']
@@ -482,6 +532,7 @@ class ViewerLRSRHR:
         diff = (hr_np.astype(np.float64) - sr_np.astype(np.float64))
         mse_val = float(np.mean(diff * diff))
         rmse_val = float(math.sqrt(mse_val))
+        mae_val = float(np.mean(np.abs(diff)))  # MAE hinzugefügt
         if mse_val <= 0.0:
             psnr_val = float('inf')
         else:
@@ -490,7 +541,7 @@ class ViewerLRSRHR:
             ssim_val = float(ssim(hr_np, sr_np, data_range=1.0))
         except Exception:
             ssim_val = float('nan')
-        return mse_val, rmse_val, psnr_val, ssim_val
+        return mse_val, rmse_val, mae_val, psnr_val, ssim_val  # MAE hinzugefügt
 
 
 def main():
@@ -517,7 +568,9 @@ def main():
 
     viewer = ViewerLRSRHR(lr_vol, sr_vol, hr_vol, scale=args.scale, lin_volume=lin_vol, bic_volume=bic_vol,
                           dicom_folder=args.dicom_folder, preset_name=args.preset, model=model, device=device)
-    print('Scroll with mouse wheel to navigate slices')
+    print('Navigation: Mouse wheel or arrow keys to navigate slices')
+    print('Keyboard shortcuts: Home (first loaded slice), End (last loaded slice), Arrow keys (previous/next)')
+    print('Note: Slices are now reverse-indexed (0 = last loaded slice, highest index = first loaded slice, like in Slicer 3D)')
     plt.show()
 
 

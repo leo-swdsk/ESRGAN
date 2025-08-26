@@ -93,7 +93,7 @@ def load_dicom_as_tensor(path, normalization='global', hu_clip=(-1000, 2000), wi
 
     if normalization == 'window':
         img = apply_window(hu, window_center, window_width)
-    else:
+    else: #bei global normalization wird der HU-Wert zwischen -1000 und 2000 geclippt und dann auf [-1,1] skaliert
         lo, hi = hu_clip
         img = np.clip(hu, lo, hi)
         img = (img - lo) / (hi - lo)  # [0,1]

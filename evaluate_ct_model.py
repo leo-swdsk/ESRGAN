@@ -61,7 +61,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     json_path = os.path.join(output_dir, f"summary_{split_name}.json")
 
     # Collect per-slice metrics and per-patient aggregations
-    fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'PSNR', 'SSIM']
+    fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM']  # MAE hinzugefügt
     rows = []
     patient_to_method_metrics = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
@@ -123,7 +123,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     global_by_method = defaultdict(lambda: defaultdict(list))
     for r in rows:
         method_name = r['method']
-        for metric_name in ['MSE', 'RMSE', 'PSNR', 'SSIM']:
+        for metric_name in ['MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM']:  # MAE hinzugefügt
             global_by_method[method_name][metric_name].append(float(r[metric_name]))
 
     global_summary = {}
@@ -150,7 +150,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         methods.update(per_patient_summary[patient_id].keys())
     for method_name in methods:
         patient_level_agg[method_name] = {}
-        for metric_name in ['MSE', 'RMSE', 'PSNR', 'SSIM']:
+        for metric_name in ['MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM']:  # MAE hinzugefügt
             patient_means = []
             for patient_id in per_patient_summary:
                 if method_name in per_patient_summary[patient_id]:
