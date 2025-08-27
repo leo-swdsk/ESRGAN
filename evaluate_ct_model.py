@@ -97,6 +97,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                         'method': method_name,
                         'MSE': float(metrics['MSE']),
                         'RMSE': float(metrics['RMSE']),
+                        'MAE': float(metrics['MAE']),  # MAE hinzugefügt
                         'PSNR': float(metrics['PSNR']),
                         'SSIM': float(metrics['SSIM'])
                     })

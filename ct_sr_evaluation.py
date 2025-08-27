@@ -21,15 +21,15 @@ def evaluate_metrics(sr_tensor, hr_tensor):
     sr_np = sr_tensor.squeeze().cpu().numpy()
     hr_np = hr_tensor.squeeze().cpu().numpy()
 
-    # Rescale from [-1,1] to [0,1] for metrics
-    sr_np = ((sr_np + 1.0) / 2.0).clip(0, 1)
-    hr_np = ((hr_np + 1.0) / 2.0).clip(0, 1)
+    # Rescale from [-1,1] to [0,1] for metrics; otherwise SSIM and my own PSNR calculation does not work correctly
+    sr_np = ((sr_np + 1) / 2).clip(0, 1)
+    hr_np = ((hr_np + 1) / 2).clip(0, 1)
 
     # Robust MSE/PSNR without warnings for perfect matches
     diff = hr_np.astype(np.float64) - sr_np.astype(np.float64)
     mse_val = float(np.mean(diff * diff))
     rmse_val = float(math.sqrt(mse_val))
-    mae_val = float(np.mean(np.abs(diff)))  # MAE hinzugefügt
+    mae_val = float(np.mean(np.abs(diff)))  
     
     if mse_val <= 0.0:
         psnr_val = float('inf')
@@ -40,7 +40,7 @@ def evaluate_metrics(sr_tensor, hr_tensor):
     return {
         "MSE": mse_val,
         "RMSE": rmse_val,
-        "MAE": mae_val,  # MAE hinzugefügt
+        "MAE": mae_val,  
         "PSNR": psnr_val,
         "SSIM": ssim_val
     }

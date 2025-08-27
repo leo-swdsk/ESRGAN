@@ -1,0 +1,491 @@
+"""
+Finetune RRDBNet (1->1 channel) on CT data with ESRGAN-style objectives.
+
+Defaults and rationale:
+- Pixel loss (L1): lambda_pix = 1.0
+- Perceptual loss (VGG19 conv5_4 pre-ReLU): lambda_perc = 0.10
+- Adversarial loss (Relativistic average GAN, RaGAN): lambda_gan = 0.005
+- Optimizer: Adam(lr=1e-4, betas=(0.9, 0.999), weight_decay=0)
+- Scheduler: MultiStepLR with milestones at 60% and 85% of total epochs (gamma=0.5)
+- AMP: torch.cuda.amp with GradScaler
+- EMA for generator weights with decay=0.999 (EMA used for validation/checkpointing)
+- Gradient clipping for both G and D with max_norm=1.0
+
+Conservative weights (lambda_perc=0.10, lambda_gan=0.005) are chosen for medical CT
+to reduce hallucinations while still providing sharper textures than pure L1 training.
+This prioritizes metric-faithful reconstructions (L1/PSNR/SSIM) over aggressively
+hallucinated details.
+"""
+
+import os
+import math
+import argparse
+from typing import Tuple, Dict
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, ConcatDataset
+from torch.cuda import amp
+from torch import amp as torch_amp
+from torchvision import models
+from torch.optim import Adam
+from torch.optim.lr_scheduler import MultiStepLR
+import matplotlib.pyplot as plt
+
+from rrdb_ct_model import RRDBNet_CT
+from ct_dataset_loader import CT_Dataset_SR
+from evaluate_ct_model import split_patients, get_patient_dirs
+from ct_sr_evaluation import evaluate_metrics
+
+
+# -----------------------------
+# Utility: EMA
+# -----------------------------
+class EMA:
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.ema_model = type(model)() if hasattr(model, '__class__') else None
+        # build a copy with same architecture
+        self.ema_model = RRDBNet_CT(in_nc=1, out_nc=1, nf=64, nb=23, gc=32, scale=model.scale)
+        self.ema_model.load_state_dict(model.state_dict(), strict=True)
+        for p in self.ema_model.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        msd = model.state_dict()
+        for k, v in self.ema_model.state_dict().items():
+            if k in msd:
+                self.ema_model.state_dict()[k].copy_(v.detach().mul(self.decay).add(msd[k].detach(), alpha=1.0 - self.decay))
+
+
+# -----------------------------
+# AMP helpers (support old/new APIs)
+# -----------------------------
+from contextlib import nullcontext
+
+def get_autocast(device: torch.device):
+    """Return a context manager for autocast that works across torch versions."""
+    if device.type != 'cuda':
+        return nullcontext()
+    # Prefer new API
+    try:
+        return torch_amp.autocast('cuda')
+    except Exception:
+        # Fallback to old CUDA-specific API
+        try:
+            return amp.autocast(enabled=True)
+        except Exception:
+            return nullcontext()
+
+def get_grad_scaler(device: torch.device):
+    """Return a GradScaler compatible with torch versions."""
+    try:
+        return torch_amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
+    except Exception:
+        return amp.GradScaler(enabled=(device.type == 'cuda'))
+
+
+# -----------------------------
+# Discriminator: PatchGAN with SpectralNorm
+# -----------------------------
+def spectral_norm(module: nn.Module) -> nn.Module:
+    return nn.utils.spectral_norm(module)
+
+
+class PatchDiscriminatorSN(nn.Module):
+    """Patch-based discriminator for 1-channel images. Outputs a score map (logits)."""
+    def __init__(self, in_nc: int = 1):
+        super().__init__()
+        nf = 64
+        layers = [
+            spectral_norm(nn.Conv2d(in_nc, nf, 3, 1, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf, nf, 3, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf, nf * 2, 3, 1, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf * 2, nf * 2, 3, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf * 2, nf * 4, 3, 1, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf * 4, nf * 4, 3, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf * 4, nf * 8, 3, 1, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf * 8, nf * 8, 3, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            spectral_norm(nn.Conv2d(nf * 8, 1, 3, 1, 1))  # logits map
+        ]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+# -----------------------------
+# Perceptual Loss (VGG19 features before ReLU)
+# -----------------------------
+class VGG19FeatureExtractor(nn.Module):
+    def __init__(self, layer: str = 'conv5_4'):
+        super().__init__()
+        vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1).features
+        # conv indices in torchvision VGG19 features
+        conv_indices = {
+            'conv1_1': 0, 'conv1_2': 2,
+            'conv2_1': 5, 'conv2_2': 7,
+            'conv3_1': 10, 'conv3_2': 12, 'conv3_3': 14, 'conv3_4': 16,
+            'conv4_1': 19, 'conv4_2': 21, 'conv4_3': 23, 'conv4_4': 25,
+            'conv5_1': 28, 'conv5_2': 30, 'conv5_3': 32, 'conv5_4': 34,
+        }
+        max_idx = conv_indices[layer]
+        # Slice up to the convolution (pre-ReLU)
+        self.features = nn.Sequential(*[vgg[i] for i in range(max_idx + 1)])
+        for p in self.features.parameters():
+            p.requires_grad_(False)
+        self.eval()
+
+        # ImageNet normalization
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    @torch.no_grad()
+    def _preprocess(self, x_1ch: torch.Tensor) -> torch.Tensor:
+        # Inputs are in [-1,1] with shape [B,1,H,W]; convert to 3ch and normalize
+        x = (x_1ch + 1.0) * 0.5  # to [0,1]
+        x = x.repeat(1, 3, 1, 1)
+        x = (x - self.mean) / self.std
+        return x
+
+    def forward(self, x_1ch: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            x = self._preprocess(x_1ch)
+        return self.features(x)
+
+
+class PerceptualLoss(nn.Module):
+    def __init__(self, layer: str = 'conv5_4', loss_fn: str = 'l1'):
+        super().__init__()
+        self.extractor = VGG19FeatureExtractor(layer)
+        self.criterion = nn.L1Loss() if loss_fn == 'l1' else nn.MSELoss()
+
+    def forward(self, sr_1ch: torch.Tensor, hr_1ch: torch.Tensor) -> torch.Tensor:
+        self.extractor.eval()
+        with torch.no_grad():
+            feat_hr = self.extractor(hr_1ch)
+        feat_sr = self.extractor(sr_1ch)  # gradients only through SR path
+        return self.criterion(feat_sr, feat_hr)
+
+
+# -----------------------------
+# RaGAN Loss
+# -----------------------------
+class RaGANLoss:
+    """
+    Implements relativistic average GAN losses for discriminator and generator.
+    Works with patch-based logits maps.
+    """
+    def d_loss(self, real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
+        real_mean = fake_logits.detach().mean()
+        fake_mean = real_logits.detach().mean()
+        loss_real = F.binary_cross_entropy_with_logits(real_logits - real_mean, torch.ones_like(real_logits))
+        loss_fake = F.binary_cross_entropy_with_logits(fake_logits - fake_mean, torch.zeros_like(fake_logits))
+        return loss_real + loss_fake
+
+    def g_loss(self, real_logits_detached: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
+        real_mean = fake_logits.mean()
+        fake_mean = real_logits_detached.mean()
+        loss_real = F.binary_cross_entropy_with_logits(real_logits_detached - real_mean, torch.zeros_like(real_logits_detached))
+        loss_fake = F.binary_cross_entropy_with_logits(fake_logits - fake_mean, torch.ones_like(fake_logits))
+        return loss_real + loss_fake
+
+
+# -----------------------------
+# Data
+# -----------------------------
+def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, num_workers: int = 4) -> Tuple[DataLoader, DataLoader]:
+    splits = split_patients(root, seed=42)
+    train_dirs = splits['train']
+    val_dirs = splits['val']
+
+    train_ds = ConcatDataset([
+        CT_Dataset_SR(d, scale_factor=scale, do_random_crop=True, hr_patch=patch_size, normalization='global')
+        for d in train_dirs
+    ])
+    val_ds = ConcatDataset([
+        CT_Dataset_SR(d, scale_factor=scale, do_random_crop=False, normalization='global')
+        for d in val_dirs
+    ])
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
+                              pin_memory=True, persistent_workers=num_workers > 0)
+    # Validation on whole slices → small batch
+    val_loader = DataLoader(val_ds, batch_size=max(1, batch_size // 4), shuffle=False, num_workers=max(1, num_workers // 2),
+                            pin_memory=True, persistent_workers=(num_workers // 2) > 0)
+    return train_loader, val_loader
+
+
+# -----------------------------
+# Models
+# -----------------------------
+def build_models(scale: int, pretrained_g: str = None, device: torch.device = torch.device('cpu')) -> Tuple[nn.Module, nn.Module, EMA]:
+    G = RRDBNet_CT(in_nc=1, out_nc=1, scale=scale).to(device)
+    if pretrained_g and os.path.isfile(pretrained_g):
+        sd = torch.load(pretrained_g, map_location=device)
+        G.load_state_dict(sd, strict=True)
+        print(f"[Init] Loaded pretrained G weights from {pretrained_g}")
+    else:
+        print("[Init] Training G from provided weights (or randomly if path invalid)")
+
+    D = PatchDiscriminatorSN(in_nc=1).to(device)
+    ema = EMA(G, decay=0.999)
+    ema.ema_model.to(device)
+    return G, D, ema
+
+
+# -----------------------------
+# Train / Validate
+# -----------------------------
+def validate(G_ema: nn.Module, val_loader: DataLoader, device: torch.device) -> Dict[str, float]:
+    G_ema.eval()
+    metrics_accum = {k: 0.0 for k in ['MAE', 'MSE', 'RMSE', 'PSNR', 'SSIM']}
+    n = 0
+    with torch.no_grad():
+        for lr, hr in val_loader:
+            lr = lr.to(device, non_blocking=True)
+            hr = hr.to(device, non_blocking=True)
+            with get_autocast(device):
+                sr = G_ema(lr)
+            m = evaluate_metrics(sr.detach().cpu(), hr.detach().cpu())
+            for k in metrics_accum:
+                metrics_accum[k] += float(m[k])
+            n += 1
+    for k in metrics_accum:
+        metrics_accum[k] /= max(1, n)
+    return metrics_accum
+
+
+def train_one_epoch(
+    G: nn.Module,
+    D: nn.Module,
+    ema: EMA,
+    train_loader: DataLoader,
+    optimizer_g: torch.optim.Optimizer,
+    optimizer_d: torch.optim.Optimizer,
+    scaler: amp.GradScaler,
+    perceptual_loss: PerceptualLoss,
+    ragan: RaGANLoss,
+    device: torch.device,
+    lambda_pix: float = 1.0,
+    lambda_perc: float = 0.10,
+    lambda_gan: float = 0.005,
+    log_interval: int = 100,
+    warmup_g_only_iters: int = 0,
+) -> float:
+    G.train()
+    D.train()
+    l1 = nn.L1Loss()
+    running_total = 0.0
+    it = 0
+
+    for lr, hr in train_loader:
+        it += 1
+        lr = lr.to(device, non_blocking=True)
+        hr = hr.to(device, non_blocking=True)
+
+        # -----------------
+        # Update Discriminator (skip in warmup)
+        # -----------------
+        if it > warmup_g_only_iters:
+            optimizer_d.zero_grad(set_to_none=True)
+            with get_autocast(device):
+                with torch.no_grad():
+                    sr = G(lr)
+                real_logits = D(hr)
+                fake_logits = D(sr.detach())
+                d_loss = ragan.d_loss(real_logits, fake_logits)
+            scaler.scale(d_loss).backward()
+            nn.utils.clip_grad_norm_(D.parameters(), max_norm=1.0)
+            scaler.step(optimizer_d)
+        else:
+            d_loss = torch.tensor(0.0, device=device)
+
+        # -----------------
+        # Update Generator
+        # -----------------
+        optimizer_g.zero_grad(set_to_none=True)
+        with get_autocast(device):
+            sr = G(lr)
+            l_pix = l1(sr, hr)
+            l_perc = perceptual_loss(sr, hr)
+            fake_logits = D(sr)
+            with torch.no_grad():
+                real_logits_detached = D(hr).detach()
+            l_gan = ragan.g_loss(real_logits_detached, fake_logits)
+            total = lambda_pix * l_pix + lambda_perc * l_perc + lambda_gan * l_gan
+        scaler.scale(total).backward()
+        nn.utils.clip_grad_norm_(G.parameters(), max_norm=1.0)
+        scaler.step(optimizer_g)
+        scaler.update()
+
+        # EMA update after G step
+        ema.update(G)
+
+        running_total += float(total.detach().cpu())
+
+        if it % log_interval == 0:
+            d_real = torch.sigmoid(real_logits.detach()).mean().item() if it > warmup_g_only_iters else 0.0
+            d_fake = torch.sigmoid(fake_logits.detach()).mean().item()
+            current_lr = optimizer_g.param_groups[0]['lr']
+            print(f"  [Iter {it}] L_pix={l_pix.item():.4f} L_perc={l_perc.item():.4f} L_gan={l_gan.item():.4f} L_total={total.item():.4f} | D_real={d_real:.3f} D_fake={d_fake:.3f} | lr={current_lr:.6f}")
+
+        # memory cleanup hints
+        del sr, l_pix, l_perc, l_gan, total, fake_logits
+        if 'real_logits' in locals():
+            del real_logits
+        torch.cuda.empty_cache()
+
+    return running_total / max(1, it)
+
+
+# -----------------------------
+# Checkpointing / Plotting
+# -----------------------------
+def save_checkpoint(out_dir: str, G_ema: nn.Module, optimizer_g: torch.optim.Optimizer, epoch: int, tag: str):
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f'{tag}.pth')
+    torch.save({
+        'epoch': epoch,
+        'model': G_ema.state_dict(),
+        'optimizer_g': optimizer_g.state_dict(),
+    }, path)
+    print(f"[CKPT] Saved {tag} -> {path}")
+
+
+def plot_curves(history: Dict[str, list], out_dir: str):
+    os.makedirs(out_dir, exist_ok=True)
+    # Loss curve
+    try:
+        plt.figure(figsize=(7,4))
+        plt.plot(history['train_total'], label='Train total loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, 'training_curve.png'), dpi=150)
+        plt.close()
+    except Exception as e:
+        print(f"[Plot] Could not save training_curve.png: {e}")
+
+    # PSNR curve
+    try:
+        plt.figure(figsize=(7,4))
+        plt.plot(history['val_psnr'], label='Val PSNR')
+        plt.xlabel('Epoch')
+        plt.ylabel('PSNR')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, 'val_psnr_curve.png'), dpi=150)
+        plt.close()
+    except Exception as e:
+        print(f"[Plot] Could not save val_psnr_curve.png: {e}")
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    parser = argparse.ArgumentParser(description='Finetune RRDB on CT with ESRGAN objectives (conservative)')
+    parser.add_argument('--data_root', type=str, required=True)
+    parser.add_argument('--scale', type=int, default=2, choices=[2,4])
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--patch', type=int, default=256)
+    parser.add_argument('--pretrained_g', type=str, default='rrdb_ct_best.pth')
+    parser.add_argument('--out_dir', type=str, default='finetune_outputs')
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lambda_perc', type=float, default=0.10)
+    parser.add_argument('--lambda_gan', type=float, default=0.005)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--warmup_g_only', type=int, default=500, help='number of iterations to train G only at start')
+    args = parser.parse_args()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"[Device] Using {device}")
+
+    # Data
+    train_loader, val_loader = build_dataloaders(
+        root=args.data_root, scale=args.scale, batch_size=args.batch_size, patch_size=args.patch, num_workers=args.num_workers
+    )
+
+    # Models
+    G, D, ema = build_models(scale=args.scale, pretrained_g=args.pretrained_g, device=device)
+    perceptual = PerceptualLoss(layer='conv5_4').to(device)
+    ragan = RaGANLoss()
+
+    optimizer_g = Adam(G.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0)
+    optimizer_d = Adam(D.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0)
+
+    milestones = [max(1, int(args.epochs * 0.6)), max(2, int(args.epochs * 0.85))]
+    scheduler_g = MultiStepLR(optimizer_g, milestones=milestones, gamma=0.5)
+    scheduler_d = MultiStepLR(optimizer_d, milestones=milestones, gamma=0.5)
+
+    scaler = get_grad_scaler(device)
+
+    history = {'train_total': [], 'val_psnr': [], 'val_mae': []}
+    best_psnr = -1e9
+    best_mae = 1e9
+
+    iters_seen = 0
+    for epoch in range(1, args.epochs + 1):
+        print(f"[Epoch {epoch}/{args.epochs}] Starting ...")
+        warmup_iters_remaining = max(0, args.warmup_g_only - iters_seen)
+        avg_train_total = train_one_epoch(
+            G, D, ema, train_loader, optimizer_g, optimizer_d, scaler, perceptual, ragan, device,
+            lambda_pix=1.0, lambda_perc=args.lambda_perc, lambda_gan=args.lambda_gan,
+            log_interval=100, warmup_g_only_iters=warmup_iters_remaining
+        )
+        history['train_total'].append(avg_train_total)
+
+        # We can estimate how many iters happened
+        iters_seen += len(train_loader)
+
+        # Scheduler steps per epoch
+        scheduler_g.step()
+        scheduler_d.step()
+
+        # Validation using EMA
+        val_metrics = validate(ema.ema_model, val_loader, device)
+        history['val_psnr'].append(val_metrics['PSNR'])
+        history['val_mae'].append(val_metrics['MAE'])
+        print(f"[Val] MAE={val_metrics['MAE']:.6f} MSE={val_metrics['MSE']:.6f} RMSE={val_metrics['RMSE']:.6f} PSNR={val_metrics['PSNR']:.4f} SSIM={val_metrics['SSIM']:.4f}")
+
+        # Checkpoints
+        improved = False
+        if val_metrics['PSNR'] > best_psnr + 1e-6:
+            best_psnr = val_metrics['PSNR']
+            improved = True
+        if val_metrics['MAE'] < best_mae - 1e-6:
+            best_mae = val_metrics['MAE']
+            improved = True
+        if improved:
+            save_checkpoint(args.out_dir, ema.ema_model, optimizer_g, epoch, tag='best')
+        save_checkpoint(args.out_dir, ema.ema_model, optimizer_g, epoch, tag='last')
+
+    # Plots
+    plot_curves(history, args.out_dir)
+
+
+if __name__ == '__main__':
+    main()
+
+

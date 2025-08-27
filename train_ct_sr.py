@@ -32,7 +32,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Train] Device: {device}")
     model = model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr) # Betas: 0.9, 0.999 (voreingestellter Standard)
     criterion = nn.L1Loss()  
 
     best_val = float("inf")

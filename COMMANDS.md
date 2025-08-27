@@ -1,11 +1,17 @@
 ## Befehlsübersicht (ausführen im Ordner `ESRGAN/`)
 
-### Training
+### Training auf L1 Loss - Vortraining
 - Kurzes Training (Patientenweise 70/15/15-Split; random-aligned Patches im Training, volle Slices in Val/Test)
 ```bash
 python train_ct_sr.py
 ```
 Hinweis: Den Daten-Root-Pfad im Script anpassen (`root = ...`). GPU empfohlen.
+
+###Feintuning - Training 2
+-vollständiges Feintuning mit 3 kombinierten Loss-Funktionen
+```bash
+python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --pretrained_g rrdb_ct_best.pth --epochs 50 --batch_size 8 --patch 256 --scale 2 --out_dir finetune_outputs --lr 1e-4 --lambda_perc 0.10 --lambda_gan 0.005 --warmup_g_only 500
+```
 
 ### Evaluierung der Modellqualität (metrisch, CSV + JSON)
 - Validierungsteilmenge, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`, schneller Test mit nur 3 Patienten mit jeweils 20 Bildern
@@ -15,7 +21,7 @@ python evaluate_ct_model.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Super
 
 - gesamter Validierungspatientendatensatz, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`
 ```bash
-python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path rrdb_ct_best.pth --slice_sampling random --seed 42
+python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path rrdb_ct_best.pth --seed 42
 ```
 
 - Finale Testauswertung (ganzer Testsplit, GPU falls verfügbar)
