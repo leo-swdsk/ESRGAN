@@ -1,5 +1,21 @@
 ## Befehlsübersicht (ausführen im Ordner `ESRGAN/`)
 
+### Preprocessing – CT In‑Plane Resampling (einmalig)
+- Resampling aller CT‑DICOM‑Slices auf einheitliches Pixel‑Spacing von 0.8 mm (in‑plane), lineare Interpolation.
+- Output liegt standardmäßig in `ESRGAN/preprocessed_data` (Unterordnerstruktur pro Patient bleibt erhalten).
+- Es wird eine Log‑Datei `preprocessing_log.csv` sowohl im Daten‑Root als auch im Output‑Ordner geschrieben.
+```bash
+python preprocess_resample_ct.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG"
+```
+- Optionalen Output‑Pfad angeben:
+```bash
+python preprocess_resample_ct.py --root "C:\...\Spine-Mets-CT-SEG" --out_dir "D:\SR\preprocessed_data" --target_spacing 0.8
+```
+- Hinweise:
+  - Nur CT‑Image‑DICOMs werden verarbeitet (SEG etc. werden ignoriert).
+  - DICOM‑Header wird angepasst: `PixelSpacing`, `Rows`, `Columns`; neue `SOPInstanceUID` pro Slice.
+  - VR‑Ambiguitäten bei `Smallest/LargestImagePixelValue` werden korrekt gesetzt (US/SS) oder entfernt.
+
 ### Training auf L1 Loss - Vortraining
 - Kurzes Training (Patientenweise 70/15/15-Split; random-aligned Patches im Training, volle Slices in Val/Test)
 ```bash

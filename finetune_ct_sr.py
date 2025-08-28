@@ -41,14 +41,14 @@ from ct_sr_evaluation import evaluate_metrics
 
 
 # -----------------------------
-# Utility: EMA
+# Utility: EMA (Exponential Moving Average) hält „geglättete“ Schattenkopie der Generator‑Gewichte, ändert sich langsamer als die Live‑Gewichte
 # -----------------------------
 class EMA:
     def __init__(self, model: nn.Module, decay: float = 0.999):
         self.decay = decay
         self.ema_model = type(model)() if hasattr(model, '__class__') else None
-        # build a copy with same architecture
-        self.ema_model = RRDBNet_CT(in_nc=1, out_nc=1, nf=64, nb=23, gc=32, scale=model.scale)
+        # build a copy with same architecture - Schattenmodell
+        self.ema_model = RRDBNet_CT(in_nc=1, out_nc=1, nf=64, nb=23, gc=32, scale=model.scale) #Modell wird hier nicht trainiert, sondern dient nur zum Validieren/Speichern der Gewichte
         self.ema_model.load_state_dict(model.state_dict(), strict=True)
         for p in self.ema_model.parameters():
             p.requires_grad_(False)
@@ -59,9 +59,6 @@ class EMA:
         for k, v in self.ema_model.state_dict().items():
             if k in msd:
                 self.ema_model.state_dict()[k].copy_(v.detach().mul(self.decay).add(msd[k].detach(), alpha=1.0 - self.decay))
-
-
-# (Using only current torch.amp API for autocast and GradScaler)
 
 
 # -----------------------------
@@ -77,31 +74,40 @@ class PatchDiscriminatorSN(nn.Module):
         super().__init__()
         nf = 64
         layers = [
+            # Schicht 1: 1 Kanal (HR-Bild) → 64 Kanäle, H×W bleibt gleich
             spectral_norm(nn.Conv2d(in_nc, nf, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 2: 64 Kanäle → 64 Kanäle, H×W wird halbiert (stride=2)
             spectral_norm(nn.Conv2d(nf, nf, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 3: 64 Kanäle → 128 Kanäle, H×W bleibt halbiert
             spectral_norm(nn.Conv2d(nf, nf * 2, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 4: 128 Kanäle → 128 Kanäle, H×W wird weiter halbiert (stride=2)
             spectral_norm(nn.Conv2d(nf * 2, nf * 2, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 5: 128 Kanäle → 256 Kanäle, H×W bleibt weiter halbiert
             spectral_norm(nn.Conv2d(nf * 2, nf * 4, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 6: 256 Kanäle → 256 Kanäle, H×W wird weiter halbiert (stride=2)
             spectral_norm(nn.Conv2d(nf * 4, nf * 4, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 7: 256 Kanäle → 512 Kanäle, H×W bleibt weiter halbiert
             spectral_norm(nn.Conv2d(nf * 4, nf * 8, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
+            # Schicht 8: 512 Kanäle → 512 Kanäle, H×W wird weiter halbiert (stride=2)
             spectral_norm(nn.Conv2d(nf * 8, nf * 8, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            spectral_norm(nn.Conv2d(nf * 8, 1, 3, 1, 1))  # logits map
+            # Schicht 9: 512 Kanäle → 1 Kanal (Logits), H×W bleibt weiter halbiert
+            spectral_norm(nn.Conv2d(nf * 8, 1, 3, 1, 1))  # Output: Logits-Matrix
         ]
         self.net = nn.Sequential(*layers)
 
@@ -171,6 +177,7 @@ class RaGANLoss:
     Implements relativistic average GAN losses for discriminator and generator.
     Works with patch-based logits maps.
     """
+    # Logit = roher, unnormalisierter Output vor der Sigmoid-Funktion
     def d_loss(self, real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
         real_mean = fake_logits.detach().mean()
         fake_mean = real_logits.detach().mean()
@@ -371,15 +378,29 @@ def train_one_epoch(
 # -----------------------------
 # Checkpointing / Plotting
 # -----------------------------
-def save_checkpoint(out_dir: str, G_ema: nn.Module, optimizer_g: torch.optim.Optimizer, epoch: int, tag: str):
+def save_checkpoint(out_dir: str, G_ema: nn.Module, G_live: nn.Module, optimizer_g: torch.optim.Optimizer, epoch: int, tag: str):
+    """Save checkpoint with both EMA weights and live weights"""
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f'{tag}.pth')
+    
+    # Save EMA checkpoint (stabilized weights)
+    path_ema = os.path.join(out_dir, f'{tag}.pth')
     torch.save({
         'epoch': epoch,
         'model': G_ema.state_dict(),
         'optimizer_g': optimizer_g.state_dict(),
-    }, path)
-    print(f"[CKPT] Saved {tag} -> {path}")
+        'weights_type': 'ema'
+    }, path_ema)
+    print(f"[CKPT] Saved {tag} (EMA) -> {path_ema}")
+    
+    # Save live weights checkpoint (raw training weights)
+    path_live = os.path.join(out_dir, f'{tag}_live.pth')
+    torch.save({
+        'epoch': epoch,
+        'model': G_live.state_dict(),
+        'optimizer_g': optimizer_g.state_dict(),
+        'weights_type': 'live'
+    }, path_live)
+    print(f"[CKPT] Saved {tag} (Live) -> {path_live}")
 
 
 def plot_curves(history: Dict[str, list], out_dir: str):
@@ -511,8 +532,8 @@ def main():
             best_mae = val_metrics['MAE']
             improved = True
         if improved:
-            save_checkpoint(args.out_dir, ema.ema_model, optimizer_g, epoch, tag='best')
-        save_checkpoint(args.out_dir, ema.ema_model, optimizer_g, epoch, tag='last')
+            save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='best')
+        save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='last')
 
         # Early stopping on selected metric
         if args.patience is not None:
