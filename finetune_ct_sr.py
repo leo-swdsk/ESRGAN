@@ -18,6 +18,7 @@ hallucinated details.
 """
 
 import os
+import json
 import math
 import argparse
 from typing import Tuple, Dict
@@ -26,12 +27,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset
-from torch.cuda import amp
 from torch import amp as torch_amp
 from torchvision import models
 from torch.optim import Adam
 from torch.optim.lr_scheduler import MultiStepLR
 import matplotlib.pyplot as plt
+from contextlib import nullcontext
 
 from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
@@ -60,31 +61,7 @@ class EMA:
                 self.ema_model.state_dict()[k].copy_(v.detach().mul(self.decay).add(msd[k].detach(), alpha=1.0 - self.decay))
 
 
-# -----------------------------
-# AMP helpers (support old/new APIs)
-# -----------------------------
-from contextlib import nullcontext
-
-def get_autocast(device: torch.device):
-    """Return a context manager for autocast that works across torch versions."""
-    if device.type != 'cuda':
-        return nullcontext()
-    # Prefer new API
-    try:
-        return torch_amp.autocast('cuda')
-    except Exception:
-        # Fallback to old CUDA-specific API
-        try:
-            return amp.autocast(enabled=True)
-        except Exception:
-            return nullcontext()
-
-def get_grad_scaler(device: torch.device):
-    """Return a GradScaler compatible with torch versions."""
-    try:
-        return torch_amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
-    except Exception:
-        return amp.GradScaler(enabled=(device.type == 'cuda'))
+# (Using only current torch.amp API for autocast and GradScaler)
 
 
 # -----------------------------
@@ -212,10 +189,33 @@ class RaGANLoss:
 # -----------------------------
 # Data
 # -----------------------------
-def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, num_workers: int = 4) -> Tuple[DataLoader, DataLoader]:
-    splits = split_patients(root, seed=42)
+def _load_split_from_json(split_json: str) -> Dict[str, list]:
+    with open(split_json, 'r') as f:
+        payload = json.load(f)
+    result = {k: [] for k in ['train', 'val', 'test']}
+    for split_name in result.keys():
+        if split_name in payload.get('splits', {}):
+            result[split_name] = [entry.get('path') for entry in payload['splits'][split_name] if 'path' in entry]
+    return result
+
+
+def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, num_workers: int = 4, split_json: str = None) -> Tuple[DataLoader, DataLoader]:
+    if split_json and os.path.isfile(split_json):
+        print(f"[Split] Using split mapping from {split_json}")
+        splits = _load_split_from_json(split_json)
+        # Confirm loaded counts
+        print(f"[Split] Loaded counts: train={len(splits['train'])} val={len(splits['val'])} test={len(splits['test'])}")
+    else:
+        print("[Split] No valid split_json provided; generating 70/15/15 split with seed=42")
+        splits = split_patients(root, seed=42)
+
     train_dirs = splits['train']
     val_dirs = splits['val']
+
+    # Filter non-existing paths defensively (especially when loading from JSON)
+    train_dirs = [p for p in train_dirs if isinstance(p, str) and os.path.isdir(p)]
+    val_dirs = [p for p in val_dirs if isinstance(p, str) and os.path.isdir(p)]
+    print(f"[Split] Existing dirs after filtering: train={len(train_dirs)} val={len(val_dirs)}")
 
     train_ds = ConcatDataset([
         CT_Dataset_SR(d, scale_factor=scale, do_random_crop=True, hr_patch=patch_size, normalization='global')
@@ -263,12 +263,23 @@ def validate(G_ema: nn.Module, val_loader: DataLoader, device: torch.device) -> 
         for lr, hr in val_loader:
             lr = lr.to(device, non_blocking=True)
             hr = hr.to(device, non_blocking=True)
-            with get_autocast(device):
+            with (torch_amp.autocast('cuda') if device.type == 'cuda' else nullcontext()):
                 sr = G_ema(lr)
-            m = evaluate_metrics(sr.detach().cpu(), hr.detach().cpu())
-            for k in metrics_accum:
-                metrics_accum[k] += float(m[k])
-            n += 1
+            sr_cpu = sr.detach().cpu()
+            hr_cpu = hr.detach().cpu()
+            # Support batched evaluation by iterating per-sample
+            if sr_cpu.ndim == 4:
+                batch = sr_cpu.shape[0]
+                for i in range(batch):
+                    m = evaluate_metrics(sr_cpu[i], hr_cpu[i])
+                    for k in metrics_accum:
+                        metrics_accum[k] += float(m[k])
+                n += batch
+            else:
+                m = evaluate_metrics(sr_cpu, hr_cpu)
+                for k in metrics_accum:
+                    metrics_accum[k] += float(m[k])
+                n += 1
     for k in metrics_accum:
         metrics_accum[k] /= max(1, n)
     return metrics_accum
@@ -281,7 +292,7 @@ def train_one_epoch(
     train_loader: DataLoader,
     optimizer_g: torch.optim.Optimizer,
     optimizer_d: torch.optim.Optimizer,
-    scaler: amp.GradScaler,
+    scaler: torch_amp.GradScaler,
     perceptual_loss: PerceptualLoss,
     ragan: RaGANLoss,
     device: torch.device,
@@ -307,7 +318,7 @@ def train_one_epoch(
         # -----------------
         if it > warmup_g_only_iters:
             optimizer_d.zero_grad(set_to_none=True)
-            with get_autocast(device):
+            with (torch_amp.autocast('cuda') if device.type == 'cuda' else nullcontext()):
                 with torch.no_grad():
                     sr = G(lr)
                 real_logits = D(hr)
@@ -323,7 +334,7 @@ def train_one_epoch(
         # Update Generator
         # -----------------
         optimizer_g.zero_grad(set_to_none=True)
-        with get_autocast(device):
+        with (torch_amp.autocast('cuda') if device.type == 'cuda' else nullcontext()):
             sr = G(lr)
             l_pix = l1(sr, hr)
             l_perc = perceptual_loss(sr, hr)
@@ -417,6 +428,9 @@ def main():
     parser.add_argument('--lambda_gan', type=float, default=0.005)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--warmup_g_only', type=int, default=500, help='number of iterations to train G only at start')
+    parser.add_argument('--split_json', type=str, default=None, help='Path to patient split JSON (from dump_patient_split.py)')
+    parser.add_argument('--patience', type=int, default=None, help='Early stopping patience in epochs (None disables)')
+    parser.add_argument('--early_metric', type=str, default='mae', choices=['mae','psnr'], help='Metric to monitor for early stopping')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -424,7 +438,8 @@ def main():
 
     # Data
     train_loader, val_loader = build_dataloaders(
-        root=args.data_root, scale=args.scale, batch_size=args.batch_size, patch_size=args.patch, num_workers=args.num_workers
+        root=args.data_root, scale=args.scale, batch_size=args.batch_size, patch_size=args.patch, num_workers=args.num_workers,
+        split_json=args.split_json
     )
 
     # Models
@@ -439,11 +454,29 @@ def main():
     scheduler_g = MultiStepLR(optimizer_g, milestones=milestones, gamma=0.5)
     scheduler_d = MultiStepLR(optimizer_d, milestones=milestones, gamma=0.5)
 
-    scaler = get_grad_scaler(device)
+    # Echo CLI config
+    print("[Config] data_root=", args.data_root)
+    print("[Config] scale=", args.scale)
+    print("[Config] epochs=", args.epochs)
+    print("[Config] batch_size=", args.batch_size)
+    print("[Config] patch=", args.patch)
+    print("[Config] pretrained_g=", args.pretrained_g)
+    print("[Config] out_dir=", args.out_dir)
+    print("[Config] lr=", args.lr)
+    print("[Config] lambda_perc=", args.lambda_perc)
+    print("[Config] lambda_gan=", args.lambda_gan)
+    print("[Config] num_workers=", args.num_workers)
+    print("[Config] warmup_g_only=", args.warmup_g_only)
+    print("[Config] split_json=", args.split_json)
+    print("[Config] patience=", args.patience)
+    print("[Config] early_metric=", args.early_metric)
+
+    scaler = torch_amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     history = {'train_total': [], 'val_psnr': [], 'val_mae': []}
     best_psnr = -1e9
     best_mae = 1e9
+    epochs_no_improve = 0
 
     iters_seen = 0
     for epoch in range(1, args.epochs + 1):
@@ -480,6 +513,21 @@ def main():
         if improved:
             save_checkpoint(args.out_dir, ema.ema_model, optimizer_g, epoch, tag='best')
         save_checkpoint(args.out_dir, ema.ema_model, optimizer_g, epoch, tag='last')
+
+        # Early stopping on selected metric
+        if args.patience is not None:
+            if args.early_metric == 'mae':
+                had_improve = (val_metrics['MAE'] <= best_mae + 1e-6)
+            else:
+                had_improve = (val_metrics['PSNR'] >= best_psnr - 1e-6)
+            if had_improve:
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                print(f"[EarlyStop] No improvement for {epochs_no_improve}/{args.patience} epochs on {args.early_metric.upper()}")
+                if epochs_no_improve >= args.patience:
+                    print("[EarlyStop] Patience reached. Stopping training early.")
+                    break
 
     # Plots
     plot_curves(history, args.out_dir)

@@ -555,7 +555,11 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device=='cuda' else 'cpu')
     model = RRDBNet_CT(scale=args.scale).to(device)
-    model.load_state_dict(torch.load(args.model_path, map_location=device))
+    state = torch.load(args.model_path, map_location=device)
+    if isinstance(state, dict) and 'model' in state and all(k in state for k in ['epoch', 'model']):
+        print("[Vis] Detected checkpoint dict; loading weights from 'model' key")
+        state = state['model']
+    model.load_state_dict(state)
     model.eval()
 
     hr_vol = load_ct_volume(args.dicom_folder, preset=args.preset)

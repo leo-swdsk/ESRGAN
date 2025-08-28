@@ -8,13 +8,13 @@ python train_ct_sr.py
 Hinweis: Den Daten-Root-Pfad im Script anpassen (`root = ...`). GPU empfohlen.
 
 ###Feintuning - Training 2
--vollständiges Feintuning mit 3 kombinierten Loss-Funktionen
+-vollständiges Feintuning mit 3 kombinierten Loss-Funktionen, bei Angabe von Split auf gleichen Daten wie Vortraining; vernünftige VRAM Auslastung, etwa 11/16 GB bei Training, 3,5 bei Validierung
 ```bash
-python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --pretrained_g rrdb_ct_best.pth --epochs 50 --batch_size 8 --patch 256 --scale 2 --out_dir finetune_outputs --lr 1e-4 --lambda_perc 0.10 --lambda_gan 0.005 --warmup_g_only 500
+python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --pretrained_g rrdb_ct_best.pth --epochs 30 --batch_size 20 --patch 128 --scale 2 --out_dir finetune_outputs --lr 1e-4 --lambda_perc 0.10 --lambda_gan 0.005 --warmup_g_only 500 --split_json ESRGAN\splits\patient_split_seed42.json --patience 3 --early_metric mae
 ```
 
 ### Evaluierung der Modellqualität (metrisch, CSV + JSON)
-- Validierungsteilmenge, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`, schneller Test mit nur 3 Patienten mit jeweils 20 Bildern
+- Validierungsteilmenge, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`, schneller Test mit nur 3 Patienten mit jeweils 20 Bildern; AUF DEM VORTRAININGS-MODELL
 ```bash
 python evaluate_ct_model.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path rrdb_ct_best.pth --max_patients 3 --max_slices_per_patient 20 --slice_sampling random --seed 42
 ```
@@ -22,6 +22,11 @@ python evaluate_ct_model.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Super
 - gesamter Validierungspatientendatensatz, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`
 ```bash
 python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path rrdb_ct_best.pth --seed 42
+```
+
+- Evaluierung des finetuneten Modells (EMA‑Best) – Dateien enthalten den Modellnamen und überschreiben nichts
+```bash
+python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path finetune_outputs\best.pth --device cuda
 ```
 
 - Finale Testauswertung (ganzer Testsplit, GPU falls verfügbar)
@@ -44,6 +49,12 @@ python visualize_lr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarbeit
 ```bash
 python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\15041" --model_path rrdb_ct_best.pth --device cuda --preset soft_tissue
 ```
+
+- LR vs SR vs HR (SR via Modell, interaktiv), ABER MIT DEM FINETUNING-MODELL
+```bash
+python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\15041" --model_path finetune_outputs\best.pth --device cuda --preset soft_tissue
+```
+
 - LR vs SR vs HR (mit besonders kleinem Datensatz 49 Slices)
 ```bash
 python visualize_lr_sr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\klein" --model_path rrdb_ct_best.pth --device cuda --preset soft_tissue

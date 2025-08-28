@@ -45,7 +45,11 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     # Prepare model
     device_t = torch.device(device if (device == 'cuda' and torch.cuda.is_available()) else 'cpu')
     model = RRDBNet_CT(scale=scale).to(device_t)
-    model.load_state_dict(torch.load(model_path, map_location=device_t))
+    state = torch.load(model_path, map_location=device_t)
+    if isinstance(state, dict) and 'model' in state and all(k in state for k in ['epoch', 'model']):
+        print("[Eval] Detected checkpoint dict; loading weights from 'model' key")
+        state = state['model']
+    model.load_state_dict(state)
     model.eval()
 
     # Determine patients for the requested split
@@ -56,9 +60,10 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     if max_patients is not None:
         patient_dirs = patient_dirs[:max_patients]
 
-    # Output files
-    csv_path = os.path.join(output_dir, f"metrics_{split_name}.csv")
-    json_path = os.path.join(output_dir, f"summary_{split_name}.json")
+    # Output files include model name tag to avoid overwrite across models
+    model_tag = os.path.splitext(os.path.basename(model_path))[0]
+    csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}.csv")
+    json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}.json")
 
     # Collect per-slice metrics and per-patient aggregations
     fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM']  # MAE hinzugefügt

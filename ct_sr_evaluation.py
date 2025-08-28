@@ -35,7 +35,23 @@ def evaluate_metrics(sr_tensor, hr_tensor):
         psnr_val = float('inf')
     else:
         psnr_val = float(10.0 * math.log10(1.0 / mse_val))
-    ssim_val = float(ssim(hr_np, sr_np, data_range=1.0))
+    # Choose an adaptive odd win_size <= min(H,W) to avoid errors on small images
+    # Support [H,W] or [1,H,W]
+    if hr_np.ndim == 3 and hr_np.shape[0] == 1:
+        hr_np = hr_np[0]
+        sr_np = sr_np[0]
+    h, w = hr_np.shape
+    min_side = max(1, min(h, w))
+    # cap at 11 (common default upper bound); ensure odd and >=3
+    ws = min(11, min_side)
+    if ws % 2 == 0:
+        ws = max(3, ws - 1)
+    ws = max(3, ws)
+    try:
+        ssim_val = float(ssim(hr_np, sr_np, data_range=1.0, win_size=ws))
+    except Exception:
+        # Fallback: if still failing, return 0.0 to keep evaluation running
+        ssim_val = 0.0
 
     return {
         "MSE": mse_val,
