@@ -6,6 +6,7 @@ from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
 import os
 import random
+import argparse
 import matplotlib.pyplot as plt
 from torch.utils.data import ConcatDataset
 from torch import amp
@@ -109,9 +110,22 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
 if __name__ == "__main__":
     random.seed(42)
 
-    # Manifest-Root mit allen Patienten-Unterordnern
-    #root = r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG"
-    root = r"C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" #RTX4080 Super
+    parser = argparse.ArgumentParser(description='Train RRDBNet_CT on CT super-resolution with L1 loss (pretraining)')
+    default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'preprocessed_data')
+    parser.add_argument('--data_root', type=str, default=default_root, help='Root with patient subfolders (default: ESRGAN/preprocessed_data)')
+    parser.add_argument('--scale', type=int, default=2, help='Upscaling factor (must divide patch_size)')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=8, help='Training batch size')
+    parser.add_argument('--patch_size', type=int, default=192, help='HR patch size (must be divisible by scale)')
+    parser.add_argument('--patience', type=int, default=7, help='Early stopping patience (epochs)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--num_workers', type=int, default=4, help='Dataloader workers for training')
+    args = parser.parse_args()
+
+    if args.patch_size % args.scale != 0:
+        raise ValueError(f"patch_size ({args.patch_size}) must be divisible by scale ({args.scale})")
+
+    root = args.data_root
     patient_dirs = [os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
     if len(patient_dirs) == 0:
         raise RuntimeError(f"No patient directories found under {root}")
@@ -129,26 +143,25 @@ if __name__ == "__main__":
 
     # Datasets zusammenfassen
     print("[Data] Building datasets ...")
-    # Train auf zufälligen, ausgerichteten Patches; Val/Test auf ganzen Slices (typisch 512x512)
-    train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=True, hr_patch=192, normalization='global', hu_clip=(-1000, 2000)) for d in train_dirs])
-    val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in val_dirs])
-    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=2, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in test_dirs])
+    # Train auf zufälligen, ausgerichteten Patches; Val/Test auf ganzen Slices
+    train_ds = ConcatDataset([CT_Dataset_SR(d, scale_factor=args.scale, do_random_crop=True, hr_patch=args.patch_size, normalization='global', hu_clip=(-1000, 2000)) for d in train_dirs])
+    val_ds   = ConcatDataset([CT_Dataset_SR(d, scale_factor=args.scale, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in val_dirs])
+    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=args.scale, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in test_dirs])
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
-    train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True, persistent_workers=True) # spart Reinitialisiierung der WOrker zwischen den Epochen
-    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2) #bewusst kleinere Batchgröße, da hier ganze Slices verwendet werden
-    test_loader  = DataLoader(test_ds,  batch_size=2, shuffle=False, num_workers=2)
-
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True, persistent_workers=True if args.num_workers > 0 else False)
+    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=max(1, args.num_workers//2))
+    test_loader  = DataLoader(test_ds,  batch_size=2, shuffle=False, num_workers=max(1, args.num_workers//2))
 
     # Modell initialisieren
-    print("[Init] Creating model RRDBNet_CT(scale=2) ...")
-    model = RRDBNet_CT(scale=2)
+    print(f"[Init] Creating model RRDBNet_CT(scale={args.scale}) ...")
+    model = RRDBNet_CT(scale=args.scale)
 
     # Training mit Early Stopping + Plot
     trained_model, train_losses, val_losses = train_sr_model(
         model, train_loader, val_loader,
-        num_epochs=50, lr=1e-4, patience=7,
+        num_epochs=args.epochs, lr=args.lr, patience=args.patience,
         save_best_path="rrdb_ct_best.pth",
         save_last_path="rrdb_ct_last.pth",
         plot_path="training_curve.png"

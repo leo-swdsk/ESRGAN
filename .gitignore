@@ -22,6 +22,8 @@ __pycache__/
 *.pyc
 *.pth
 *.pt
+*.json
+*.csv
 
 # image files
 *.png

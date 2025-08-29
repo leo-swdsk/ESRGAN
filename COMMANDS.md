@@ -17,11 +17,25 @@ python preprocess_resample_ct.py --root "C:\...\Spine-Mets-CT-SEG" --out_dir "D:
   - VR‑Ambiguitäten bei `Smallest/LargestImagePixelValue` werden korrekt gesetzt (US/SS) oder entfernt.
 
 ### Training auf L1 Loss - Vortraining
-- Kurzes Training (Patientenweise 70/15/15-Split; random-aligned Patches im Training, volle Slices in Val/Test)
+- Kurzes Training (Patientenweise 70/15/15-Split; random-aligned Patches im Training, volle Slices in Val/Test). Standardmäßig wird `ESRGAN/preprocessed_data` verwendet.
 ```bash
 python train_ct_sr.py
 ```
-Hinweis: Den Daten-Root-Pfad im Script anpassen (`root = ...`). GPU empfohlen.
+- Alternativ mit expliziten Parametern (Beispielwerte = Defaults):
+```bash
+python train_ct_sr.py \
+  --data_root "ESRGAN/preprocessed_data" \
+  --scale 2 \
+  --epochs 50 \
+  --batch_size 8 \
+  --patch_size 192 \
+  --patience 7 \
+  --lr 1e-4
+```
+- Hinweise:
+  - `patch_size` muss durch `scale` teilbar sein.
+  - Für Verwendung ohne Preprocessing: `--data_root` auf den Rohdaten-Root setzen.
+  - GPU empfohlen.
 
 ###Feintuning - Training 2
 -vollständiges Feintuning mit 3 kombinierten Loss-Funktionen, bei Angabe von Split auf gleichen Daten wie Vortraining; vernünftige VRAM Auslastung, etwa 11/16 GB bei Training, 3,5 bei Validierung
