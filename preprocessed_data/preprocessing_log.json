@@ -1,0 +1,937 @@
+[
+  {
+    "patient_id": "10250",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.703125,
+      0.703125
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 450,
+    "new_cols": 450
+  },
+  {
+    "patient_id": "10352",
+    "num_slices": 1134,
+    "pixel_spacing_mm": [
+      0.837890625,
+      0.837890625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 536,
+    "new_cols": 536
+  },
+  {
+    "patient_id": "10355",
+    "num_slices": 451,
+    "pixel_spacing_mm": [
+      0.73828125,
+      0.73828125
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 472,
+    "new_cols": 472
+  },
+  {
+    "patient_id": "10456",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.84765625,
+      0.84765625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 542,
+    "new_cols": 542
+  },
+  {
+    "patient_id": "10458",
+    "num_slices": 390,
+    "pixel_spacing_mm": [
+      1.269531,
+      1.269531
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 812,
+    "new_cols": 812
+  },
+  {
+    "patient_id": "10543",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.833984375,
+      0.833984375
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 534,
+    "new_cols": 534
+  },
+  {
+    "patient_id": "11084",
+    "num_slices": 969,
+    "pixel_spacing_mm": [
+      0.890625,
+      0.890625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 570,
+    "new_cols": 570
+  },
+  {
+    "patient_id": "11471",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.859375,
+      0.859375
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 550,
+    "new_cols": 550
+  },
+  {
+    "patient_id": "12196",
+    "num_slices": 399,
+    "pixel_spacing_mm": [
+      0.3125,
+      0.3125
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 200,
+    "new_cols": 200
+  },
+  {
+    "patient_id": "12459",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.853515625,
+      0.853515625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 546,
+    "new_cols": 546
+  },
+  {
+    "patient_id": "12855",
+    "num_slices": 651,
+    "pixel_spacing_mm": [
+      0.865234375,
+      0.865234375
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 554,
+    "new_cols": 554
+  },
+  {
+    "patient_id": "13055",
+    "num_slices": 527,
+    "pixel_spacing_mm": [
+      0.728515625,
+      0.728515625
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 466,
+    "new_cols": 466
+  },
+  {
+    "patient_id": "13089",
+    "num_slices": 508,
+    "pixel_spacing_mm": [
+      0.3125,
+      0.3125
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 200,
+    "new_cols": 200
+  },
+  {
+    "patient_id": "13627",
+    "num_slices": 430,
+    "pixel_spacing_mm": [
+      0.658203125,
+      0.658203125
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 421,
+    "new_cols": 421
+  },
+  {
+    "patient_id": "13641",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.9765625,
+      0.9765625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 625,
+    "new_cols": 625
+  },
+  {
+    "patient_id": "13643",
+    "num_slices": 532,
+    "pixel_spacing_mm": [
+      0.861328,
+      0.861328
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 551,
+    "new_cols": 551
+  },
+  {
+    "patient_id": "13653",
+    "num_slices": 2124,
+    "pixel_spacing_mm": [
+      0.3125,
+      0.3125
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 200,
+    "new_cols": 200
+  },
+  {
+    "patient_id": "13662",
+    "num_slices": 522,
+    "pixel_spacing_mm": [
+      0.851562,
+      0.851562
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 545,
+    "new_cols": 545
+  },
+  {
+    "patient_id": "13681",
+    "num_slices": 399,
+    "pixel_spacing_mm": [
+      1.269531,
+      1.269531
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 812,
+    "new_cols": 812
+  },
+  {
+    "patient_id": "13683",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.736328125,
+      0.736328125
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 471,
+    "new_cols": 471
+  },
+  {
+    "patient_id": "13697",
+    "num_slices": 817,
+    "pixel_spacing_mm": [
+      0.693359375,
+      0.693359375
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 444,
+    "new_cols": 444
+  },
+  {
+    "patient_id": "13800",
+    "num_slices": 221,
+    "pixel_spacing_mm": [
+      0.92578125,
+      0.92578125
+    ],
+    "slice_thickness_mm": 3.0,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 592,
+    "new_cols": 592
+  },
+  {
+    "patient_id": "13819",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.3125,
+      0.3125
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 200,
+    "new_cols": 200
+  },
+  {
+    "patient_id": "13838",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.716796875,
+      0.716796875
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 459,
+    "new_cols": 459
+  },
+  {
+    "patient_id": "13843",
+    "num_slices": 242,
+    "pixel_spacing_mm": [
+      0.976562,
+      0.976562
+    ],
+    "slice_thickness_mm": 2.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 625,
+    "new_cols": 625
+  },
+  {
+    "patient_id": "13977",
+    "num_slices": 412,
+    "pixel_spacing_mm": [
+      0.69921875,
+      0.69921875
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 448,
+    "new_cols": 448
+  },
+  {
+    "patient_id": "13989",
+    "num_slices": 527,
+    "pixel_spacing_mm": [
+      0.917968749999999,
+      0.917968749999999
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 587,
+    "new_cols": 587
+  },
+  {
+    "patient_id": "14078",
+    "num_slices": 350,
+    "pixel_spacing_mm": [
+      0.976562,
+      0.976562
+    ],
+    "slice_thickness_mm": 2.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 625,
+    "new_cols": 625
+  },
+  {
+    "patient_id": "14089",
+    "num_slices": 332,
+    "pixel_spacing_mm": [
+      0.759765625,
+      0.759765625
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 486,
+    "new_cols": 486
+  },
+  {
+    "patient_id": "14138",
+    "num_slices": 574,
+    "pixel_spacing_mm": [
+      0.765625,
+      0.765625
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 490,
+    "new_cols": 490
+  },
+  {
+    "patient_id": "14151",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.84375,
+      0.84375
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 540,
+    "new_cols": 540
+  },
+  {
+    "patient_id": "14293",
+    "num_slices": 537,
+    "pixel_spacing_mm": [
+      0.859375,
+      0.859375
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 550,
+    "new_cols": 550
+  },
+  {
+    "patient_id": "14313",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.763671875,
+      0.763671875
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 489,
+    "new_cols": 489
+  },
+  {
+    "patient_id": "14316",
+    "num_slices": 399,
+    "pixel_spacing_mm": [
+      0.3125,
+      0.3125
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 200,
+    "new_cols": 200
+  },
+  {
+    "patient_id": "14427",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.853515625,
+      0.853515625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 546,
+    "new_cols": 546
+  },
+  {
+    "patient_id": "14434",
+    "num_slices": 590,
+    "pixel_spacing_mm": [
+      0.935546999999999,
+      0.935546999999999
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 599,
+    "new_cols": 599
+  },
+  {
+    "patient_id": "14439",
+    "num_slices": 450,
+    "pixel_spacing_mm": [
+      0.791016,
+      0.791016
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 506,
+    "new_cols": 506
+  },
+  {
+    "patient_id": "14445",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.76171875,
+      0.76171875
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 488,
+    "new_cols": 488
+  },
+  {
+    "patient_id": "14487",
+    "num_slices": 477,
+    "pixel_spacing_mm": [
+      0.82421875,
+      0.82421875
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 528,
+    "new_cols": 528
+  },
+  {
+    "patient_id": "14636",
+    "num_slices": 435,
+    "pixel_spacing_mm": [
+      0.84765625,
+      0.84765625
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 542,
+    "new_cols": 542
+  },
+  {
+    "patient_id": "14638",
+    "num_slices": 544,
+    "pixel_spacing_mm": [
+      0.683594,
+      0.683594
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 438,
+    "new_cols": 438
+  },
+  {
+    "patient_id": "14643",
+    "num_slices": 522,
+    "pixel_spacing_mm": [
+      0.820312,
+      0.820312
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 525,
+    "new_cols": 525
+  },
+  {
+    "patient_id": "14650",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.90625,
+      0.90625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 580,
+    "new_cols": 580
+  },
+  {
+    "patient_id": "14655",
+    "num_slices": 399,
+    "pixel_spacing_mm": [
+      0.878906,
+      0.878906
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 562,
+    "new_cols": 562
+  },
+  {
+    "patient_id": "14659",
+    "num_slices": 397,
+    "pixel_spacing_mm": [
+      0.996094,
+      0.996094
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 638,
+    "new_cols": 638
+  },
+  {
+    "patient_id": "14797",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.767578125,
+      0.767578125
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 491,
+    "new_cols": 491
+  },
+  {
+    "patient_id": "14826",
+    "num_slices": 793,
+    "pixel_spacing_mm": [
+      0.7421875,
+      0.7421875
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 475,
+    "new_cols": 475
+  },
+  {
+    "patient_id": "14874",
+    "num_slices": 399,
+    "pixel_spacing_mm": [
+      0.789062,
+      0.789062
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 505,
+    "new_cols": 505
+  },
+  {
+    "patient_id": "14912",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.796875,
+      0.796875
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 510,
+    "new_cols": 510
+  },
+  {
+    "patient_id": "15001",
+    "num_slices": 517,
+    "pixel_spacing_mm": [
+      0.796875,
+      0.796875
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 510,
+    "new_cols": 510
+  },
+  {
+    "patient_id": "15027",
+    "num_slices": 495,
+    "pixel_spacing_mm": [
+      0.7890625,
+      0.7890625
+    ],
+    "slice_thickness_mm": 1.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 505,
+    "new_cols": 505
+  },
+  {
+    "patient_id": "15040",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.818359375,
+      0.818359375
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 524,
+    "new_cols": 524
+  },
+  {
+    "patient_id": "15041",
+    "num_slices": 399,
+    "pixel_spacing_mm": [
+      0.794922,
+      0.794922
+    ],
+    "slice_thickness_mm": 1.25,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 509,
+    "new_cols": 509
+  },
+  {
+    "patient_id": "15067",
+    "num_slices": 797,
+    "pixel_spacing_mm": [
+      0.83984375,
+      0.83984375
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 538,
+    "new_cols": 538
+  },
+  {
+    "patient_id": "15094",
+    "num_slices": 1317,
+    "pixel_spacing_mm": [
+      0.9765625,
+      0.9765625
+    ],
+    "slice_thickness_mm": 0.5,
+    "new_pixel_spacing_mm": [
+      0.8,
+      0.8
+    ],
+    "orig_rows": 512,
+    "orig_cols": 512,
+    "new_rows": 625,
+    "new_cols": 625
+  }
+]

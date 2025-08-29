@@ -2,8 +2,8 @@
 
 ### Preprocessing – CT In‑Plane Resampling (einmalig)
 - Resampling aller CT‑DICOM‑Slices auf einheitliches Pixel‑Spacing von 0.8 mm (in‑plane), lineare Interpolation.
-- Output liegt standardmäßig in `ESRGAN/preprocessed_data` (Unterordnerstruktur pro Patient bleibt erhalten).
-- Es wird eine Log‑Datei `preprocessing_log.csv` sowohl im Daten‑Root als auch im Output‑Ordner geschrieben.
+- Output liegt standardmäßig in `ESRGAN/preprocessed_data` (Unterordnerstruktur pro Patient bleibt erhalten, Patientenordner erhalten Suffix `pp`).
+- Logs: `preprocessing_log.csv` und `preprocessing_log.json` werden NUR im Output‑Ordner geschrieben.
 ```bash
 python preprocess_resample_ct.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG"
 ```

@@ -1,6 +1,7 @@
 import os
 import argparse
 import csv
+import json
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -8,6 +9,11 @@ import pydicom
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 from pydicom.tag import Tag
 from pydicom.dataelem import DataElement
+try:
+    from pydicom.uid import PYDICOM_IMPLEMENTATION_UID, PYDICOM_IMPLEMENTATION_VERSION
+except Exception:
+    PYDICOM_IMPLEMENTATION_UID = generate_uid()
+    PYDICOM_IMPLEMENTATION_VERSION = 'PYDICOM'
 
 try:
     from scipy.ndimage import zoom as nd_zoom
@@ -59,7 +65,9 @@ def resample_slice(arr: np.ndarray, src_row_mm: float, src_col_mm: float, target
 
 def ensure_out_path(out_root: str, patient_id: str, src_patient_dir: str, src_file_path: str) -> str:
     rel_inside_patient = os.path.relpath(os.path.dirname(src_file_path), src_patient_dir)
-    dst_dir = os.path.join(out_root, patient_id, rel_inside_patient)
+    # Suffix patient folder with 'pp' to mark preprocessing
+    patient_folder = patient_id if patient_id.endswith('pp') else f"{patient_id}pp"
+    dst_dir = os.path.join(out_root, patient_folder, rel_inside_patient)
     os.makedirs(dst_dir, exist_ok=True)
     dst_path = os.path.join(dst_dir, os.path.basename(src_file_path))
     return dst_path
@@ -78,22 +86,51 @@ def write_resampled_dicom(ds: pydicom.dataset.FileDataset, resampled: np.ndarray
     ds.Columns = int(resampled.shape[1])
     ds.PixelSpacing = [float(target_mm), float(target_mm)]
 
+    # Ensure CT image identity (avoid accidental SEG headers, ensure scalar volume compliance)
+    ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.2'  # CT Image Storage
+    ds.Modality = 'CT'
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = 'MONOCHROME2'
+
+    # Ensure pixel type fields consistent with dtype
+    bits_alloc = resampled.dtype.itemsize * 8
+    ds.BitsAllocated = bits_alloc
+    ds.BitsStored = bits_alloc
+    ds.HighBit = bits_alloc - 1
+
     # Update meta to uncompressed explicit VR little endian
     if not hasattr(ds, 'file_meta') or ds.file_meta is None:
         from pydicom.dataset import FileMetaDataset
         ds.file_meta = FileMetaDataset()
-    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-    ds.is_little_endian = True
-    ds.is_implicit_VR = False
-
-    # Generate a new SOPInstanceUID to mark derived image (keep Study/Series unless you want a new series)
+    # File Meta Information (Part 10) – required fields
+    ds.file_meta.FileMetaInformationVersion = b"\x00\x01"
+    ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+    # Generate a new SOPInstanceUID to mark derived image (keep Study/Series)
     try:
         ds.SOPInstanceUID = generate_uid()
     except Exception:
         pass
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.file_meta.ImplementationClassUID = PYDICOM_IMPLEMENTATION_UID
+    ds.file_meta.ImplementationVersionName = str(PYDICOM_IMPLEMENTATION_VERSION)[:16]
+    ds.is_little_endian = True
+    ds.is_implicit_VR = False
 
     # Replace pixel data
     ds.PixelData = resampled.tobytes()
+
+    # Ensure required CT image attributes exist to satisfy strict readers
+    if not hasattr(ds, 'RescaleSlope'):
+        ds.RescaleSlope = 1
+    if not hasattr(ds, 'RescaleIntercept'):
+        ds.RescaleIntercept = 0
+    if not hasattr(ds, 'ImageType'):
+        ds.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']
+    if not hasattr(ds, 'PatientID'):
+        ds.PatientID = 'Anonymous'
+    if not hasattr(ds, 'PatientName'):
+        ds.PatientName = 'Anonymous'
 
     # Optional but good practice: update Largest/SmallestImagePixelValue with explicit VR resolution
     try:
@@ -155,6 +192,7 @@ def process_patient(patient_dir: str, out_root: str, target_mm: float) -> Option
         try:
             arr = ds.pixel_array
         except Exception:
+            # Skip non-image or unsupported pixel data files (e.g., SEG objects)
             continue
 
         row_mm, col_mm, slice_thickness, rows, cols = read_spacing_and_geometry(ds)
@@ -217,6 +255,26 @@ def write_log(csv_path: str, rows: List[dict]):
             w.writerow(r)
 
 
+def write_json_log(json_path: str, rows: List[dict]):
+    # Convert CSV-style rows into JSON with combined pixel spacing
+    json_rows = []
+    for r in rows:
+        entry = {
+            'patient_id': r.get('patient_id'),
+            'num_slices': r.get('num_slices'),
+            'pixel_spacing_mm': [r.get('orig_row_mm'), r.get('orig_col_mm')],
+            'slice_thickness_mm': r.get('slice_thickness_mm'),
+            'new_pixel_spacing_mm': [r.get('new_row_mm'), r.get('new_col_mm')],
+            'orig_rows': r.get('orig_rows'),
+            'orig_cols': r.get('orig_cols'),
+            'new_rows': r.get('new_rows'),
+            'new_cols': r.get('new_cols'),
+        }
+        json_rows.append(entry)
+    with open(json_path, 'w') as f:
+        json.dump(json_rows, f, indent=2)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Resample CT DICOM slices to uniform in-plane spacing and persist results')
     parser.add_argument('--root', type=str, required=True, help='Root folder with per-patient subfolders')
@@ -251,12 +309,12 @@ def main():
         if row is not None:
             log_rows.append(row)
 
-    # Write consolidated CSV log in dataset root and in output folder
-    csv_path_root = os.path.join(args.root, 'preprocessing_log.csv')
+    # Write consolidated logs in output folder only
     csv_path_out = os.path.join(out_root, 'preprocessing_log.csv')
-    write_log(csv_path_root, log_rows)
     write_log(csv_path_out, log_rows)
-    print(f"[Preproc] Wrote logs: {csv_path_root} and {csv_path_out}")
+    json_path_out = os.path.join(out_root, 'preprocessing_log.json')
+    write_json_log(json_path_out, log_rows)
+    print(f"[Preproc] Wrote logs: {csv_path_out}, {json_path_out}")
     print(f"[Preproc] Done. Output root: {os.path.abspath(out_root)}")
 
 
