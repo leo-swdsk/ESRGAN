@@ -115,7 +115,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_root', type=str, default=default_root, help='Root with patient subfolders (default: ESRGAN/preprocessed_data)')
     parser.add_argument('--scale', type=int, default=2, help='Upscaling factor (must divide patch_size)')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=8, help='Training batch size')
+    parser.add_argument('--batch_size', type=int, default=10, help='Training batch size')
     parser.add_argument('--patch_size', type=int, default=192, help='HR patch size (must be divisible by scale)')
     parser.add_argument('--patience', type=int, default=7, help='Early stopping patience (epochs)')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
@@ -124,6 +124,16 @@ if __name__ == "__main__":
 
     if args.patch_size % args.scale != 0:
         raise ValueError(f"patch_size ({args.patch_size}) must be divisible by scale ({args.scale})")
+
+    print("[Args] Training configuration:")
+    print(f"  data_root   : {args.data_root}")
+    print(f"  scale       : {args.scale}")
+    print(f"  epochs      : {args.epochs}")
+    print(f"  batch_size  : {args.batch_size}")
+    print(f"  patch_size  : {args.patch_size}")
+    print(f"  patience    : {args.patience}")
+    print(f"  lr          : {args.lr}")
+    print(f"  num_workers : {args.num_workers}")
 
     root = args.data_root
     patient_dirs = [os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
@@ -151,8 +161,8 @@ if __name__ == "__main__":
     # DataLoader
     print("[Data] Creating dataloaders ...")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True, persistent_workers=True if args.num_workers > 0 else False)
-    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=max(1, args.num_workers//2))
-    test_loader  = DataLoader(test_ds,  batch_size=2, shuffle=False, num_workers=max(1, args.num_workers//2))
+    val_loader   = DataLoader(val_ds,   batch_size=1, shuffle=False, num_workers=max(1, args.num_workers//2))
+    test_loader  = DataLoader(test_ds,  batch_size=1, shuffle=False, num_workers=max(1, args.num_workers//2))
 
     # Modell initialisieren
     print(f"[Init] Creating model RRDBNet_CT(scale={args.scale}) ...")

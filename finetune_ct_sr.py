@@ -235,8 +235,8 @@ def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, n
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
                               pin_memory=True, persistent_workers=num_workers > 0)
-    # Validation on whole slices → small batch
-    val_loader = DataLoader(val_ds, batch_size=max(1, batch_size // 4), shuffle=False, num_workers=max(1, num_workers // 2),
+    # Validation on whole slices (variable sizes) → batch_size=1 to avoid collate size mismatches
+    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=max(1, num_workers // 2),
                             pin_memory=True, persistent_workers=(num_workers // 2) > 0)
     return train_loader, val_loader
 

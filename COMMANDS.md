@@ -40,7 +40,7 @@ python train_ct_sr.py \
 ###Feintuning - Training 2
 -vollständiges Feintuning mit 3 kombinierten Loss-Funktionen, bei Angabe von Split auf gleichen Daten wie Vortraining; vernünftige VRAM Auslastung, etwa 11/16 GB bei Training, 3,5 bei Validierung
 ```bash
-python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --pretrained_g rrdb_ct_best.pth --epochs 30 --batch_size 20 --patch 128 --scale 2 --out_dir finetune_outputs --lr 1e-4 --lambda_perc 0.10 --lambda_gan 0.005 --warmup_g_only 500 --split_json ESRGAN\splits\patient_split_seed42.json --patience 3 --early_metric mae
+python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\preprocessed_data" --pretrained_g rrdb_ct_best.pth --epochs 30 --batch_size 20 --patch 128 --scale 2 --out_dir finetune_outputs --lr 1e-4 --lambda_perc 0.10 --lambda_gan 0.005 --warmup_g_only 500 --split_json ESRGAN\splits\patient_split_seed42.json --patience 4 --early_metric mae
 ```
 
 ### Evaluierung der Modellqualität (metrisch, CSV + JSON)
@@ -51,7 +51,7 @@ python evaluate_ct_model.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Super
 
 - gesamter Validierungspatientendatensatz, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`
 ```bash
-python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path rrdb_ct_best.pth --seed 42
+python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\preprocessed_data" --split val --model_path rrdb_ct_best.pth --seed 42
 ```
 
 - Evaluierung des finetuneten Modells (EMA‑Best) – Dateien enthalten den Modellnamen und überschreiben nichts
@@ -78,6 +78,12 @@ python visualize_lr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarbeit
 - LR vs SR vs HR (SR via Modell, interaktiv)
 ```bash
 python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\15041" --model_path rrdb_ct_best.pth --device cuda --preset soft_tissue
+```
+
+- LR vs SR vs HR (SR via Modell, interaktiv) auf den homogenisierten Daten mit Pixel Spacing von 0.8 mm
+```bash
+python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\preprocessed_data\15040pp" --model_path rrdb_ct_best.pth --device cuda --preset soft_tiss
+ue
 ```
 
 - LR vs SR vs HR (SR via Modell, interaktiv), ABER MIT DEM FINETUNING-MODELL

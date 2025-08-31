@@ -133,6 +133,20 @@ class CT_Dataset_SR(Dataset):
     def __getitem__(self, idx):
         hr = load_dicom_as_tensor(self.paths[idx], normalization=self.normalization, hu_clip=self.hu_clip,
                                    window_center=self.wc, window_width=self.ww)   # [1, H, W]
+        # Für volle Slices sicherstellen, dass Dimensionen Vielfache von scale sind (zentriert croppen)
+        if not self.do_random_crop:
+            _, H, W = hr.shape
+            # Wunsch: bei ungerader Größe (z.B. 491x491) explizit auf 490x490 croppen (scale=2 → nächstes Vielfaches)
+            target_H = (H // self.scale) * self.scale
+            target_W = (W // self.scale) * self.scale
+            if target_H <= 0 or target_W <= 0:
+                # Fallback: unverändert lassen, wird später evtl. per random crop behandelt
+                pass
+            elif target_H != H or target_W != W:
+                y0 = (H - target_H) // 2
+                x0 = (W - target_W) // 2
+                hr = hr[:, y0:y0+target_H, x0:x0+target_W]
+
         lr = downsample_tensor(hr, self.scale)                         # [1, H/s, W/s]
 
         # optionaler zufälliger, ausgerichteter Crop (z. B. 128 HR-Pixel)
