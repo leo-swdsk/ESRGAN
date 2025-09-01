@@ -164,6 +164,22 @@ def build_lr_volume_from_hr(hr_volume, scale=2, *, degradation='blurnoise', blur
 		antialias_clean=antialias_clean)
 
 
+def center_crop_to_multiple(volume: torch.Tensor, scale: int) -> torch.Tensor:
+    # volume: [D,1,H,W]; crop H,W to nearest lower multiple of scale (centered)
+    D, C, H, W = volume.shape
+    target_H = (H // scale) * scale
+    target_W = (W // scale) * scale
+    if target_H <= 0 or target_W <= 0:
+        return volume
+    if target_H == H and target_W == W:
+        return volume
+    y0 = (H - target_H) // 2
+    x0 = (W - target_W) // 2
+    cropped = volume[:, :, y0:y0+target_H, x0:x0+target_W]
+    print(f"[Vis] Center-cropped HR from ({H},{W}) -> ({target_H},{target_W}) to match scale={scale}")
+    return cropped
+
+
 def build_sr_volume_from_lr(lr_volume, model):
 	device = next(model.parameters()).device
 	model.eval()
@@ -560,6 +576,7 @@ class ViewerLRSRHR:
             override = (center, width)
         print(f"[Window] Rebuilding with preset={self.preset_name} override={override}")
         new_hr = load_ct_volume(self.dicom_folder, preset=self.preset_name, override_window=override)
+        new_hr = center_crop_to_multiple(new_hr, self.scale)
         new_lr = build_lr_volume_from_hr(new_hr, scale=self.scale)
         # model inference per slice
         new_sr = build_sr_volume_from_lr(new_lr, self.model)
@@ -632,6 +649,7 @@ def main():
     model.eval()
 
     hr_vol = load_ct_volume(args.dicom_folder, preset=args.preset)
+    hr_vol = center_crop_to_multiple(hr_vol, args.scale)
     print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
     lr_vol = build_lr_volume_from_hr(
         hr_vol, scale=args.scale,

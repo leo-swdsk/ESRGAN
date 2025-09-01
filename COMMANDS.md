@@ -138,28 +138,22 @@ Standard: `--degradation blurnoise`. Ziel ist die realistischere Simulation eine
 - Wo setze ich welche Flags?
   - `train_ct_sr.py` (Pretraining, Default blurnoise):
     ```bash
-    python train_ct_sr.py --data_root "preprocessed_data" --scale 2 --degradation blurnoise \
-      --blur_sigma_range 0.7 0.9 --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5
+    python train_ct_sr.py --data_root "preprocessed_data" --scale 2 --degradation blurnoise --blur_sigma_range 0.7 0.9 --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5
     ```
   - `finetune_ct_sr.py` (GAN‑Finetuning, Default blurnoise):
     ```bash
-    python finetune_ct_sr.py --data_root "preprocessed_data" --scale 2 --degradation blurnoise \
-      --blur_sigma_range 0.7 0.9 --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5
+    python finetune_ct_sr.py --data_root "preprocessed_data" --scale 2 --degradation blurnoise --blur_sigma_range 0.7 0.9 --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5
     ```
   - `evaluate_ct_model.py` (metrische Auswertung, Default blurnoise):
     ```bash
-    python evaluate_ct_model.py --root "preprocessed_data" --split val \
-      --model_path rrdb_x2_blurnoise_best.pth --degradation blurnoise --dose_factor_range 0.25 0.5
+    python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path rrdb_x2_blurnoise_best.pth --degradation blurnoise --dose_factor_range 0.25 0.5
     ```
     Hinweis: Setze hier die gleichen Degradationsparameter wie im Training.
   - `visualize_lr_hr.py` (LR vs HR, Default blurnoise):
     ```bash
-    python visualize_lr_hr.py --dicom_folder "preprocessed_data/15041pp" --preset soft_tissue \
-      --degradation blurnoise --dose_factor_range 0.25 0.5
+    python visualize_lr_hr.py --dicom_folder "preprocessed_data/15041pp" --preset soft_tissue --degradation blurnoise --dose_factor_range 0.25 0.5
     ```
   - `visualize_lr_sr_hr.py` (LR vs SR vs HR, Default blurnoise):
     ```bash
-    python visualize_lr_sr_hr.py --dicom_folder ".../Spine-Mets-CT-SEG/15041" \
-      --model_path rrdb_x2_blurnoise_best.pth --device cuda --preset soft_tissue \
-      --degradation blurnoise --dose_factor_range 0.25 0.5
+    python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/15041pp" --model_path rrdb_x2_blurnoise_best.pth --device cuda --preset soft_tissue --degradation blurnoise --dose_factor_range 0.25 0.5
     ```
