@@ -148,7 +148,7 @@ class CT_Dataset_SR(Dataset):
     def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None,
                  do_random_crop=True, hr_patch=128, normalization='global', hu_clip=(-1000, 2000),
                  degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-                 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
+                 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True):
         self.paths = find_dicom_files_recursively(dicom_folder)
         if max_slices:
             self.paths = self.paths[:max_slices]

@@ -38,7 +38,8 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda', scale=2, preset='soft_tissue',
+def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda', scale=2,
+                   normalization='global', hu_clip=(-1000, 2000), preset='soft_tissue', window_center=40, window_width=400,
                    max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
                    degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
                    noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
@@ -62,10 +63,25 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     if max_patients is not None:
         patient_dirs = patient_dirs[:max_patients]
 
-    # Output files include model name tag to avoid overwrite across models
+    # Build normalization tag for file names
+    if normalization == 'global':
+        try:
+            lo, hi = float(hu_clip[0]), float(hu_clip[1])
+            norm_tag = f"globalHU_{int(lo)}_{int(hi)}"
+        except Exception:
+            norm_tag = "globalHU"
+    else:
+        # prefer preset name if provided
+        if isinstance(preset, str) and len(preset) > 0:
+            norm_tag = f"preset-{preset}"
+        else:
+            norm_tag = f"wlww_{int(window_center)}_{int(window_width)}"
+
+    # Output files include model name tag and normalization tag; also append split suffix for clarity
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
-    csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}.csv")
-    json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}.json")
+    suffix = f"_on_{split_name}_set"
+    csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}__{norm_tag}{suffix}.csv")
+    json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}__{norm_tag}{suffix}.json")
 
     # Collect per-slice metrics and per-patient aggregations
     fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM']  # MAE hinzugefügt
@@ -74,6 +90,10 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
     rng = random.Random(seed)
 
+    if normalization == 'global':
+        print(f"[Eval] Using normalization='global' | hu_clip={hu_clip} (preset/WL/WW ignored)")
+    else:
+        print(f"[Eval] Using normalization='window' | preset={preset} | WL/WW=({window_center},{window_width})")
     print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={blur_sigma_range} | blur_kernel={blur_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
     with torch.no_grad():
         for p_idx, patient_dir in enumerate(patient_dirs):
@@ -84,7 +104,10 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 patient_dir,
                 scale_factor=scale,
                 do_random_crop=False,
-                normalization='global',
+                normalization=normalization,
+                hu_clip=tuple(hu_clip),
+                window_center=window_center,
+                window_width=window_width,
                 degradation=degradation,
                 blur_sigma_range=blur_sigma_range,
                 blur_kernel=blur_kernel,
@@ -215,12 +238,17 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 def main():
     parser = argparse.ArgumentParser(description='Evaluate CT SR model with aggregated metrics and summaries')
     parser.add_argument('--root', type=str, required=True, help='Root folder containing patient subfolders (same as training root)')
-    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'], help='Which split to evaluate')
-    parser.add_argument('--model_path', type=str, default='rrdb_ct_best.pth', help='Path to trained model weights')
+    parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'], help='Which split to evaluate')
+    parser.add_argument('--model_path', type=str, default='rrdb_x2_blurnoise_best.pth', help='Path to trained model weights')
     parser.add_argument('--output_dir', type=str, default='eval_results', help='Directory to write CSV/JSON outputs')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
-    parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset (for completeness)')
+    # Normalization/windowing (default: global HU clip [-1000,2000])
+    parser.add_argument('--normalization', type=str, default='global', choices=['global', 'window'], help='Normalization mode (default: global)')
+    parser.add_argument('--hu_clip', type=float, nargs=2, default=[-1000.0, 2000.0], help='HU clip range for global normalization [lo hi]')
+    parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset name for naming (if window mode used)')
+    parser.add_argument('--window_center', type=float, default=40.0, help='Window center (if normalization=window)')
+    parser.add_argument('--window_width', type=float, default=400.0, help='Window width (if normalization=window)')
     parser.add_argument('--max_patients', type=int, default=None, help='Optional limit of patients for a quick run')
     parser.add_argument('--max_slices_per_patient', type=int, default=None, help='Optional limit of slices per patient for a quick run')
     parser.add_argument('--slice_sampling', type=str, default='random', choices=['first', 'random'], help='How to select slices when limited')
@@ -230,9 +258,32 @@ def main():
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
     parser.add_argument('--blur_kernel', type=int, default=None, help='Explicit odd kernel size; if None, derived from sigma')
     parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
-    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[1.0, 1.0], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
+    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
+
+    # Echo CLI config
+    print("[Eval-Args] root=", args.root)
+    print("[Eval-Args] split=", args.split)
+    print("[Eval-Args] model_path=", args.model_path)
+    print("[Eval-Args] output_dir=", args.output_dir)
+    print("[Eval-Args] device=", args.device)
+    print("[Eval-Args] scale=", args.scale)
+    print("[Eval-Args] normalization=", args.normalization)
+    print("[Eval-Args] hu_clip=", args.hu_clip)
+    print("[Eval-Args] preset=", args.preset)
+    print("[Eval-Args] window_center=", args.window_center)
+    print("[Eval-Args] window_width=", args.window_width)
+    print("[Eval-Args] max_patients=", args.max_patients)
+    print("[Eval-Args] max_slices_per_patient=", args.max_slices_per_patient)
+    print("[Eval-Args] slice_sampling=", args.slice_sampling)
+    print("[Eval-Args] seed=", args.seed)
+    print("[Eval-Args] degradation=", args.degradation)
+    print("[Eval-Args] blur_sigma_range=", args.blur_sigma_range)
+    print("[Eval-Args] blur_kernel=", args.blur_kernel)
+    print("[Eval-Args] noise_sigma_range_norm=", args.noise_sigma_range_norm)
+    print("[Eval-Args] dose_factor_range=", args.dose_factor_range)
+    print("[Eval-Args] antialias_clean=", args.antialias_clean)
 
     evaluate_split(
         root_folder=args.root,
@@ -241,7 +292,11 @@ def main():
         output_dir=args.output_dir,
         device=args.device,
         scale=args.scale,
+        normalization=args.normalization,
+        hu_clip=tuple(args.hu_clip),
         preset=args.preset,
+        window_center=args.window_center,
+        window_width=args.window_width,
         max_patients=args.max_patients,
         max_slices_per_patient=args.max_slices_per_patient,
         slice_sampling=args.slice_sampling,

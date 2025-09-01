@@ -37,29 +37,36 @@ python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\pre
 ```
 
 ### Evaluierung der Modellqualität (metrisch, CSV + JSON)
-- Validierungsteilmenge, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`, schneller Test mit nur 3 Patienten mit jeweils 20 Bildern; AUF DEM VORTRAININGS-MODELL
+- Standard: globale Normalisierung (HU‑Clip [-1000, 2000]) + Degradation `blurnoise`. Dateinamen enthalten Modell und Normalisierungs‑Tag.
+
+- Beispiel (Global HU‑Clip, Val-Split, schneller Lauf):
 ```bash
-python evaluate_ct_model.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path rrdb_x2_blurnoise_best.pth --max_patients 3 --max_slices_per_patient 20 --slice_sampling random --seed 42 --degradation blurnoise --dose_factor_range 0.25 0.5
+python evaluate_ct_model.py \
+  --root "preprocessed_data" \
+  --split val \
+  --model_path rrdb_x2_blurnoise_best.pth \
+  --normalization global --hu_clip -1000 2000 \
+  --max_patients 3 --max_slices_per_patient 20 --slice_sampling random \
+  --degradation blurnoise --dose_factor_range 0.25 0.5 --seed 42
 ```
 
-- gesamter Validierungspatientendatensatz, zufällige Slices (reproduzierbar wegen Seed), schreibt `eval_results/metrics_<split>.csv` und `summary_<split>.json`
+- Beispiel (Soft‑Tissue‑Fensterung, kompletter Val‑Split):
 ```bash
-python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\preprocessed_data" --split val --model_path rrdb_x2_blurnoise_best.pth --seed 42 --degradation blurnoise
+python evaluate_ct_model.py \
+  --root "preprocessed_data" \
+  --split val \
+  --model_path rrdb_x2_blurnoise_best.pth \
+  --normalization window --preset soft_tissue --window_center 40 --window_width 400 \
+  --degradation blurnoise --seed 42
 ```
 
-- Evaluierung des finetuneten Modells (EMA‑Best) – Dateien enthalten den Modellnamen und überschreiben nichts
-```bash
-python evaluate_ct_model.py --root "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split val --model_path finetune_outputs\best.pth --device cuda --degradation blurnoise
-```
+- Ausgabe-Dateien (Beispielnamen):
+  - Global: `metrics_val_rrdb_x2_blurnoise_best__globalHU_-1000_2000.csv`, `summary_val_rrdb_x2_blurnoise_best__globalHU_-1000_2000.json`
+  - Soft Tissue: `metrics_val_rrdb_x2_blurnoise_best__preset-soft_tissue.csv`, `summary_val_rrdb_x2_blurnoise_best__preset-soft_tissue.json`
 
-- Finale Testauswertung (ganzer Testsplit, GPU falls verfügbar)
+- CPU erzwingen (falls keine GPU verfügbar):
 ```bash
-python evaluate_ct_model.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --split test --model_path rrdb_ct_best.pth --output_dir eval_results --device cuda
-```
-
-- CPU erzwingen (falls keine GPU verfügbar)
-```bash
-python evaluate_ct_model.py --root "C:\...\Spine-Mets-CT-SEG" --split val --model_path rrdb_ct_best.pth --device cpu
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path rrdb_x2_blurnoise_best.pth --device cpu
 ```
 
 ### Visualisierung

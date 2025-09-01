@@ -132,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma (in normalized image units). If None, defaults by scale (x2≈0.8±0.1, x4≈1.2±0.15).')
     parser.add_argument('--blur_kernel', type=int, default=None, help='Explicit odd kernel size for blur. If None, derived from sigma')
     parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image (approx 0–10 HU)')
-    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[1.0, 1.0], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
+    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
 
