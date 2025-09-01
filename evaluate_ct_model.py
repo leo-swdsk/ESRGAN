@@ -39,7 +39,9 @@ def ensure_dir(path):
 
 
 def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda', scale=2, preset='soft_tissue',
-                   max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42):
+                   max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
+                   degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
+                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
     ensure_dir(output_dir)
 
     # Prepare model
@@ -72,12 +74,24 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
     rng = random.Random(seed)
 
+    print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={blur_sigma_range} | blur_kernel={blur_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
     with torch.no_grad():
         for p_idx, patient_dir in enumerate(patient_dirs):
             patient_id = os.path.basename(patient_dir)
 
-            # Full-slice dataset for evaluation (no random crop)
-            ds = CT_Dataset_SR(patient_dir, scale_factor=scale, do_random_crop=False, normalization='global',)
+            # Full-slice dataset for evaluation (no random crop) with consistent degradation
+            ds = CT_Dataset_SR(
+                patient_dir,
+                scale_factor=scale,
+                do_random_crop=False,
+                normalization='global',
+                degradation=degradation,
+                blur_sigma_range=blur_sigma_range,
+                blur_kernel=blur_kernel,
+                noise_sigma_range_norm=tuple(noise_sigma_range_norm),
+                dose_factor_range=tuple(dose_factor_range),
+                antialias_clean=antialias_clean
+            )
             num_slices = len(ds)
             limit_slices = min(num_slices, max_slices_per_patient) if max_slices_per_patient else num_slices
 
@@ -211,6 +225,13 @@ def main():
     parser.add_argument('--max_slices_per_patient', type=int, default=None, help='Optional limit of slices per patient for a quick run')
     parser.add_argument('--slice_sampling', type=str, default='random', choices=['first', 'random'], help='How to select slices when limited')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducible sampling')
+    # Degradation flags (default to blurnoise)
+    parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation (default: blurnoise)')
+    parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
+    parser.add_argument('--blur_kernel', type=int, default=None, help='Explicit odd kernel size; if None, derived from sigma')
+    parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
+    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[1.0, 1.0], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
+    parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
 
     evaluate_split(
@@ -224,7 +245,13 @@ def main():
         max_patients=args.max_patients,
         max_slices_per_patient=args.max_slices_per_patient,
         slice_sampling=args.slice_sampling,
-        seed=args.seed
+        seed=args.seed,
+        degradation=args.degradation,
+        blur_sigma_range=args.blur_sigma_range,
+        blur_kernel=args.blur_kernel,
+        noise_sigma_range_norm=args.noise_sigma_range_norm,
+        dose_factor_range=args.dose_factor_range,
+        antialias_clean=args.antialias_clean
     )
 
 

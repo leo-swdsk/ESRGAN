@@ -206,7 +206,9 @@ def _load_split_from_json(split_json: str) -> Dict[str, list]:
     return result
 
 
-def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, num_workers: int = 4, split_json: str = None) -> Tuple[DataLoader, DataLoader]:
+def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, num_workers: int = 4, split_json: str = None,
+                      degradation: str = 'blurnoise', blur_sigma_range=None, blur_kernel: int = None,
+                      noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean: bool = True) -> Tuple[DataLoader, DataLoader]:
     if split_json and os.path.isfile(split_json):
         print(f"[Split] Using split mapping from {split_json}")
         splits = _load_split_from_json(split_json)
@@ -225,12 +227,33 @@ def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, n
     print(f"[Split] Existing dirs after filtering: train={len(train_dirs)} val={len(val_dirs)}")
 
     train_ds = ConcatDataset([
-        CT_Dataset_SR(d, scale_factor=scale, do_random_crop=True, hr_patch=patch_size, normalization='global')
-        for d in train_dirs
+        CT_Dataset_SR(
+            d,
+            scale_factor=scale,
+            do_random_crop=True,
+            hr_patch=patch_size,
+            normalization='global',
+            degradation=degradation,
+            blur_sigma_range=blur_sigma_range,
+            blur_kernel=blur_kernel,
+            noise_sigma_range_norm=tuple(noise_sigma_range_norm),
+            dose_factor_range=tuple(dose_factor_range),
+            antialias_clean=antialias_clean
+        ) for d in train_dirs
     ])
     val_ds = ConcatDataset([
-        CT_Dataset_SR(d, scale_factor=scale, do_random_crop=False, normalization='global')
-        for d in val_dirs
+        CT_Dataset_SR(
+            d,
+            scale_factor=scale,
+            do_random_crop=False,
+            normalization='global',
+            degradation=degradation,
+            blur_sigma_range=blur_sigma_range,
+            blur_kernel=blur_kernel,
+            noise_sigma_range_norm=tuple(noise_sigma_range_norm),
+            dose_factor_range=tuple(dose_factor_range),
+            antialias_clean=antialias_clean
+        ) for d in val_dirs
     ])
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
@@ -378,28 +401,34 @@ def train_one_epoch(
 # -----------------------------
 # Checkpointing / Plotting
 # -----------------------------
-def save_checkpoint(out_dir: str, G_ema: nn.Module, G_live: nn.Module, optimizer_g: torch.optim.Optimizer, epoch: int, tag: str):
+def save_checkpoint(out_dir: str, G_ema: nn.Module, G_live: nn.Module, optimizer_g: torch.optim.Optimizer, epoch: int, tag: str, *, metadata: dict = None):
     """Save checkpoint with both EMA weights and live weights"""
     os.makedirs(out_dir, exist_ok=True)
     
     # Save EMA checkpoint (stabilized weights)
     path_ema = os.path.join(out_dir, f'{tag}.pth')
-    torch.save({
+    payload_ema = {
         'epoch': epoch,
         'model': G_ema.state_dict(),
         'optimizer_g': optimizer_g.state_dict(),
         'weights_type': 'ema'
-    }, path_ema)
+    }
+    if metadata is not None:
+        payload_ema['meta'] = metadata
+    torch.save(payload_ema, path_ema)
     print(f"[CKPT] Saved {tag} (EMA) -> {path_ema}")
     
     # Save live weights checkpoint (raw training weights)
     path_live = os.path.join(out_dir, f'{tag}_live.pth')
-    torch.save({
+    payload_live = {
         'epoch': epoch,
         'model': G_live.state_dict(),
         'optimizer_g': optimizer_g.state_dict(),
         'weights_type': 'live'
-    }, path_live)
+    }
+    if metadata is not None:
+        payload_live['meta'] = metadata
+    torch.save(payload_live, path_live)
     print(f"[CKPT] Saved {tag} (Live) -> {path_live}")
 
 
@@ -452,6 +481,13 @@ def main():
     parser.add_argument('--split_json', type=str, default=None, help='Path to patient split JSON (from dump_patient_split.py)')
     parser.add_argument('--patience', type=int, default=None, help='Early stopping patience in epochs (None disables)')
     parser.add_argument('--early_metric', type=str, default='mae', choices=['mae','psnr'], help='Metric to monitor for early stopping')
+    # Degradation options
+    parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation')
+    parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
+    parser.add_argument('--blur_kernel', type=int, default=None, help='Explicit odd kernel size; if None, derived from sigma')
+    parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
+    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[1.0, 1.0], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
+    parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -460,7 +496,13 @@ def main():
     # Data
     train_loader, val_loader = build_dataloaders(
         root=args.data_root, scale=args.scale, batch_size=args.batch_size, patch_size=args.patch, num_workers=args.num_workers,
-        split_json=args.split_json
+        split_json=args.split_json,
+        degradation=args.degradation,
+        blur_sigma_range=args.blur_sigma_range,
+        blur_kernel=args.blur_kernel,
+        noise_sigma_range_norm=args.noise_sigma_range_norm,
+        dose_factor_range=args.dose_factor_range,
+        antialias_clean=args.antialias_clean
     )
 
     # Models
@@ -491,10 +533,34 @@ def main():
     print("[Config] split_json=", args.split_json)
     print("[Config] patience=", args.patience)
     print("[Config] early_metric=", args.early_metric)
+    print("[Config] degradation=", args.degradation)
+    print("[Config] blur_sigma_range=", args.blur_sigma_range)
+    print("[Config] blur_kernel=", args.blur_kernel)
+    print("[Config] noise_sigma_range_norm=", args.noise_sigma_range_norm)
+    print("[Config] dose_factor_range=", args.dose_factor_range)
+    print("[Config] antialias_clean=", args.antialias_clean)
 
     scaler = torch_amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     history = {'train_total': [], 'val_psnr': [], 'val_mae': []}
+    exp_name = f"rrdb_x{args.scale}_{args.degradation}"
+    meta = {
+        'experiment': exp_name,
+        'scale_factor': args.scale,
+        'degradation': args.degradation,
+        'blur_sigma_range': args.blur_sigma_range if args.blur_sigma_range is not None else (None),
+        'blur_kernel': args.blur_kernel,
+        'noise_sigma_range_norm': args.noise_sigma_range_norm,
+        'dose_factor_range': args.dose_factor_range,
+        'notes': 'blur/noise degrader, jitter per patch (finetune)'
+    }
+    # write metadata JSON
+    try:
+        with open(f"{exp_name}.json", 'w') as f:
+            json.dump(meta, f, indent=2)
+        print(f"[Meta] Wrote experiment metadata JSON -> {exp_name}.json")
+    except Exception as e:
+        print(f"[Meta] Could not write metadata JSON: {e}")
     best_psnr = -1e9
     best_mae = 1e9
     epochs_no_improve = 0
@@ -532,8 +598,8 @@ def main():
             best_mae = val_metrics['MAE']
             improved = True
         if improved:
-            save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='best')
-        save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='last')
+            save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='best', metadata=meta)
+        save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='last', metadata=meta)
 
         # Early stopping on selected metric
         if args.patience is not None:

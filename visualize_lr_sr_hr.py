@@ -97,9 +97,71 @@ def map_index_between_hr_lr(hr_index, hr_shape, lr_shape):
     return int(np.clip(hr_index, 0, min(D_hr, D_lr) - 1))
 
 
-def build_lr_volume_from_hr(hr_volume, scale=2):
-	# Per-slice bilinear interpolation: treat D as batch dimension
-	return F.interpolate(hr_volume, scale_factor=(1.0/scale, 1.0/scale), mode='bilinear', align_corners=False, antialias=True)
+def _gaussian_kernel_2d(sigma: float, kernel_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    k = int(kernel_size)
+    if k % 2 == 0:
+        k += 1
+    half = (k - 1) // 2
+    x = torch.arange(-half, half + 1, device=device, dtype=dtype)
+    g1 = torch.exp(-(x ** 2) / (2 * sigma * sigma))
+    g1 = g1 / g1.sum()
+    kernel = torch.outer(g1, g1)
+    kernel = kernel / kernel.sum()
+    return kernel.view(1, 1, k, k)
+
+
+def _kernel_size_from_sigma(sigma: float) -> int:
+    k = int(max(3, round(6.0 * float(sigma))))
+    if k % 2 == 0:
+        k += 1
+    return k
+
+
+def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 'blurnoise', blur_sigma_range=None,
+                     blur_kernel: int = None, noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0),
+                     antialias_clean: bool = True) -> torch.Tensor:
+    device = hr_volume.device
+    dtype = hr_volume.dtype
+    if degradation in ('blur', 'blurnoise'):
+        if blur_sigma_range is None:
+            base_sigma = 0.8 if scale == 2 else (1.2 if scale == 4 else 0.8)
+            jitter = 0.1 if scale == 2 else 0.15
+            sig_lo, sig_hi = max(1e-6, base_sigma - jitter), base_sigma + jitter
+        else:
+            sig_lo, sig_hi = float(blur_sigma_range[0]), float(blur_sigma_range[1])
+        sigma = float(np.random.uniform(sig_lo, sig_hi))
+        k = blur_kernel if blur_kernel is not None else _kernel_size_from_sigma(sigma)
+        kernel = _gaussian_kernel_2d(max(1e-6, sigma), k, device, dtype)
+        pad = (k // 2, k // 2, k // 2, k // 2)
+        x = F.pad(hr_volume, pad, mode='reflect')
+        hr_blur = F.conv2d(x, kernel)
+    else:
+        hr_blur = hr_volume
+
+    if degradation == 'clean':
+        lr = F.interpolate(hr_blur, scale_factor=(1.0/scale, 1.0/scale), mode='bilinear', align_corners=False, antialias=antialias_clean)
+    else:
+        lr = F.interpolate(hr_blur, scale_factor=(1.0/scale, 1.0/scale), mode='bilinear', align_corners=False, antialias=False)
+
+    if degradation == 'blurnoise':
+        n_lo, n_hi = float(noise_sigma_range_norm[0]), float(noise_sigma_range_norm[1])
+        d_lo, d_hi = float(dose_factor_range[0]), float(dose_factor_range[1])
+        noise_sigma = float(np.random.uniform(n_lo, n_hi))
+        dose = float(np.random.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
+        noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
+        lr = torch.clamp(lr + torch.randn_like(lr) * noise_eff, -1.0, 1.0)
+    return lr
+
+
+def build_lr_volume_from_hr(hr_volume, scale=2, *, degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
+							 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
+	return degrade_hr_to_lr(hr_volume, scale,
+		degradation=degradation,
+		blur_sigma_range=blur_sigma_range,
+		blur_kernel=blur_kernel,
+		noise_sigma_range_norm=noise_sigma_range_norm,
+		dose_factor_range=dose_factor_range,
+		antialias_clean=antialias_clean)
 
 
 def build_sr_volume_from_lr(lr_volume, model):
@@ -551,6 +613,13 @@ def main():
     parser.add_argument('--model_path', type=str, default='rrdb_ct_best.pth', help='Path to trained model weights')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
+    # Degradation flags (default blurnoise)
+    parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation (default: blurnoise)')
+    parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
+    parser.add_argument('--blur_kernel', type=int, default=None, help='Explicit odd kernel size; if None, derived from sigma')
+    parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
+    parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[1.0, 1.0], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
+    parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device=='cuda' else 'cpu')
@@ -563,7 +632,16 @@ def main():
     model.eval()
 
     hr_vol = load_ct_volume(args.dicom_folder, preset=args.preset)
-    lr_vol = build_lr_volume_from_hr(hr_vol, scale=args.scale)
+    print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
+    lr_vol = build_lr_volume_from_hr(
+        hr_vol, scale=args.scale,
+        degradation=args.degradation,
+        blur_sigma_range=args.blur_sigma_range,
+        blur_kernel=args.blur_kernel,
+        noise_sigma_range_norm=args.noise_sigma_range_norm,
+        dose_factor_range=args.dose_factor_range,
+        antialias_clean=args.antialias_clean
+    )
     sr_vol = build_sr_volume_from_lr(lr_vol, model)
     # Also build linear and bicubic upscales of LR to HR size for side-by-side comparison
     # Treat D as batch, use bilinear/bicubic per slice
