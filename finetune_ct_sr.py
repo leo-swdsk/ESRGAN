@@ -271,6 +271,9 @@ def build_models(scale: int, pretrained_g: str = None, device: torch.device = to
     G = RRDBNet_CT(in_nc=1, out_nc=1, scale=scale).to(device)
     if pretrained_g and os.path.isfile(pretrained_g):
         sd = torch.load(pretrained_g, map_location=device)
+        if isinstance(sd, dict) and 'model' in sd and all(k in sd for k in ['epoch', 'model']):
+            print(f"[Init] Detected checkpoint dict; loading weights from 'model' key: {pretrained_g}")
+            sd = sd['model']
         G.load_state_dict(sd, strict=True)
         print(f"[Init] Loaded pretrained G weights from {pretrained_g}")
     else:
