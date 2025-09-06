@@ -12,6 +12,7 @@ from window_presets import WINDOW_PRESETS
 from ct_dataset_loader import is_ct_image_dicom
 from rrdb_ct_model import RRDBNet_CT
 from skimage.metrics import structural_similarity as ssim
+import io, contextlib
 
 
 def apply_window_np(img, center, width):
@@ -180,16 +181,18 @@ def center_crop_to_multiple(volume: torch.Tensor, scale: int) -> torch.Tensor:
     return cropped
 
 
-def build_sr_volume_from_lr(lr_volume, model):
+def build_sr_volume_from_lr(lr_volume, model, batch_size: int = 8):
 	device = next(model.parameters()).device
 	model.eval()
-	srs = []
+	slices = lr_volume.shape[0]
+	outs = []
 	with torch.no_grad():
-		for z in range(lr_volume.shape[0]):
-			sl = lr_volume[z:z+1]  # [1,1,h,w] (D dimension retained)
-			sr = model(sl.to(device)).cpu()  # [1,1,H,W]
-			srs.append(sr)
-	return torch.cat(srs, dim=0)  # [D,1,H,W]
+		for i in range(0, slices, max(1, batch_size)):
+			batch = lr_volume[i:i+batch_size]  # [B,1,h,w]
+			with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+				y = model(batch.to(device))  # [B,1,H,W]
+			outs.append(y.cpu())
+	return torch.cat(outs, dim=0)  # [D,1,H,W]
 
 
 class ViewerLRSRHR:
@@ -385,21 +388,25 @@ class ViewerLRSRHR:
 
        # Find best per metric (MSE/RMSE/MAE min, PSNR/SSIM max) across all methods present
         names = list(metrics.keys())
-        by_metric = {'MSE': {}, 'RMSE': {}, 'MAE': {}, 'PSNR': {}, 'SSIM': {}}  # MAE hinzugefügt
+        by_metric = {'MSE': {}, 'RMSE': {}, 'MAE': {}, 'PSNR': {}, 'SSIM': {}, 'LPIPS': {}, 'PI': {}}
         for name in names:
-            mse_val, rmse_val, mae_val, psnr_val, ssim_val = metrics[name]  # MAE hinzugefügt
+            mse_val, rmse_val, mae_val, psnr_val, ssim_val, lpips_val, pi_val = metrics[name]
             by_metric['MSE'][name] = mse_val
             by_metric['RMSE'][name] = rmse_val
             by_metric['MAE'][name] = mae_val  # MAE hinzugefügt
             by_metric['PSNR'][name] = psnr_val
             by_metric['SSIM'][name] = ssim_val
+            by_metric['LPIPS'][name] = lpips_val
+            by_metric['PI'][name] = pi_val
         print(f"[Viewer.update] metrics: {metrics}")
         best = {
             'MSE': min(by_metric['MSE'], key=by_metric['MSE'].get),
             'RMSE': min(by_metric['RMSE'], key=by_metric['RMSE'].get),
-            'MAE': min(by_metric['MAE'], key=by_metric['MAE'].get),  # MAE hinzugefügt
+            'MAE': min(by_metric['MAE'], key=by_metric['MAE'].get),
             'PSNR': max(by_metric['PSNR'], key=by_metric['PSNR'].get),
             'SSIM': max(by_metric['SSIM'], key=by_metric['SSIM'].get),
+            'LPIPS': min(by_metric['LPIPS'], key=by_metric['LPIPS'].get),
+            'PI': min(by_metric['PI'], key=by_metric['PI'].get),
         }
 
         # Layout metric lines under each other (three full rows with all values, best ones green)
@@ -408,7 +415,7 @@ class ViewerLRSRHR:
         for i, name in enumerate(['SR', 'Linear', 'Bicubic']):
             if name not in metrics:
                 continue
-            mse_val, rmse_val, mae_val, psnr_val, ssim_val = metrics[name]  # MAE hinzugefügt
+            mse_val, rmse_val, mae_val, psnr_val, ssim_val, lpips_val, pi_val = metrics[name]
             # create separate text artists to color best values
             x_start = 0.02
             y = y0_text - i*dy
@@ -423,6 +430,14 @@ class ViewerLRSRHR:
             add_val(0.40, f"MAE={mae_val:.6f}", name == best['MAE'])  # MAE hinzugefügt
             add_val(0.55, f"PSNR={psnr_val:.2f}dB", name == best['PSNR'])
             add_val(0.70, f"SSIM={ssim_val:.4f}", name == best['SSIM'])
+            # second row for LPIPS/PI to avoid overlap
+            y2 = y - 0.022
+            self.metric_texts.append(self.fig.text(0.02, y2, "", ha='left', va='top', family='monospace', color='black'))
+            def add_val2(x, txt, is_best):
+                color = 'green' if is_best else 'black'
+                self.metric_texts.append(self.fig.text(x, y2, txt, ha='left', va='top', color=color, family='monospace'))
+            add_val2(0.10, f"LPIPS={lpips_val:.4f}", name == best['LPIPS'])
+            add_val2(0.30, f"PI={pi_val:.3f}", name == best['PI'])
         self._images_ready = True
         self.fig.canvas.draw_idle()
 
@@ -579,7 +594,8 @@ class ViewerLRSRHR:
         new_hr = center_crop_to_multiple(new_hr, self.scale)
         new_lr = build_lr_volume_from_hr(new_hr, scale=self.scale)
         # model inference per slice
-        new_sr = build_sr_volume_from_lr(new_lr, self.model)
+        # batched model inference for speed
+        new_sr = build_sr_volume_from_lr(new_lr, self.model, batch_size=8)
         # linear/bicubic upscales for comparison
         new_lin = F.interpolate(new_lr, scale_factor=(self.scale, self.scale), mode='bilinear', align_corners=False)
         new_bic = F.interpolate(new_lr, scale_factor=(self.scale, self.scale), mode='bicubic', align_corners=False)
@@ -620,7 +636,91 @@ class ViewerLRSRHR:
             ssim_val = float(ssim(hr_np, sr_np, data_range=1.0))
         except Exception:
             ssim_val = float('nan')
-        return mse_val, rmse_val, mae_val, psnr_val, ssim_val  # MAE hinzugefügt
+        # LPIPS
+        try:
+            # Prefer pyiqa LPIPS if available
+            lpips_val = float('nan')
+            try:
+                import pyiqa as _pyiqa
+                if not hasattr(self, '_pyiqa_lpips'):
+                    self._pyiqa_lpips = _pyiqa.create_metric('lpips')
+                    self._pyiqa_lpips.eval()
+                x = torch.tensor(sr_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                x3 = x.repeat(1,3,1,1)
+                y = torch.tensor(hr_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                y3 = y.repeat(1,3,1,1)
+                with torch.no_grad():
+                    lpips_val = float(self._pyiqa_lpips(x3, y3).item())
+            except Exception:
+                import lpips as _lp
+                lpips_model = getattr(self, '_lpips_model', None)
+                if lpips_model is None:
+                    lpips_model = _lp.LPIPS(net='alex')
+                    lpips_model.eval()
+                    self._lpips_model = lpips_model
+                def to3_m11(x01):
+                    x = torch.tensor(x01*2-1.0, dtype=torch.float32).unsqueeze(0)
+                    return x.repeat(1,3,1,1)
+                lpips_val = float(lpips_model(to3_m11(sr_np), to3_m11(hr_np)).item())
+        except Exception:
+            lpips_val = float('nan')
+        # PI
+        pi_val = float('nan')
+        dbg_ma = float('nan')
+        dbg_niqe = float('nan')
+        try:
+            import pyiqa as _pyiqa
+            if not hasattr(self, '_piqa_niqe'):
+                self._piqa_niqe = _pyiqa.create_metric('niqe')
+                try:
+                    self._piqa_niqe.to('cpu')
+                except Exception:
+                    pass
+            # Initialize Ma metric once (nrqm in pyiqa)
+            if not hasattr(self, '_ma_init_tried'):
+                self._ma_init_tried = True
+                self._ma_available = True
+                try:
+                    self._piqa_ma = _pyiqa.create_metric('nrqm')
+                    try:
+                        self._piqa_ma.to('cpu')
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self._ma_available = False
+                    print(f"[Ma-Setup] pyiqa 'nrqm' not available in this environment -> {e}")
+                    print("[Ma-Setup] To enable PI, ensure pyiqa provides 'nrqm' metric and weights.")
+            x = torch.tensor(sr_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            # Geräteausrichtung
+            try:
+                dev = next(self._piqa_niqe.parameters()).device
+            except Exception:
+                dev = torch.device('cpu')
+            # NIQE auf nativer Graustufen-Auflösung
+            x_niqe = x.to(dev)
+            # Ma erfordert 3 Kanäle und konstante Eingangsgröße
+            x3 = x.repeat(1,3,1,1)
+            x3r = F.interpolate(x3, size=(224, 224), mode='bilinear', align_corners=False).to(dev)
+            print(f"[Ma-Debug-Input] device={dev} shape={tuple(x3r.shape)} minmax=({float(x3r.min()):.4f},{float(x3r.max()):.4f}) mean={float(x3r.mean()):.4f}")
+            with torch.no_grad():
+                dbg_niqe = float(self._piqa_niqe(x_niqe).item())
+                if getattr(self, '_ma_available', False):
+                    dbg_ma = float(self._piqa_ma(x3r).item())
+                else:
+                    dbg_ma = float('nan')
+            pi_val = float(0.5 * ((10.0 - dbg_ma) + dbg_niqe))
+        except Exception as e:
+            import traceback
+            print(f"[Ma-Debug-Error] {e}")
+            traceback.print_exc()
+            try:
+                from skimage.metrics import niqe as _sk_niqe
+                dbg_niqe = float(_sk_niqe(sr_np.astype(np.float64)))
+                pi_val = dbg_niqe
+            except Exception:
+                pass
+        print(f"[PI-Debug] NIQE={dbg_niqe:.4f} MA={dbg_ma:.4f} -> PI={pi_val:.4f}")
+        return mse_val, rmse_val, mae_val, psnr_val, ssim_val, lpips_val, pi_val
 
 
 def main():
@@ -630,6 +730,7 @@ def main():
     parser.add_argument('--model_path', type=str, default='rrdb_ct_best.pth', help='Path to trained model weights')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
+    parser.add_argument('--sr_batch', type=int, default=8, help='Batch size for batched SR inference (speed up GUI)')
     # Degradation flags (default blurnoise)
     parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation (default: blurnoise)')
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
@@ -660,7 +761,7 @@ def main():
         dose_factor_range=args.dose_factor_range,
         antialias_clean=args.antialias_clean
     )
-    sr_vol = build_sr_volume_from_lr(lr_vol, model)
+    sr_vol = build_sr_volume_from_lr(lr_vol, model, batch_size=args.sr_batch)
     # Also build linear and bicubic upscales of LR to HR size for side-by-side comparison
     # Treat D as batch, use bilinear/bicubic per slice
     lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
