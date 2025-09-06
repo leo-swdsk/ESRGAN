@@ -79,6 +79,29 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
     return vol
 
 
+def read_series_metadata(folder_path):
+    row_mm = None; col_mm = None; slice_thickness = None; patient_id = ''
+    for root, _, files in os.walk(folder_path):
+        for f in sorted(files):
+            if not f.lower().endswith('.dcm'):
+                continue
+            path = os.path.join(root, f)
+            if not is_ct_image_dicom(path):
+                continue
+            try:
+                ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+                ps = getattr(ds, 'PixelSpacing', None)
+                if ps is not None and len(ps) >= 2:
+                    row_mm = float(ps[0]); col_mm = float(ps[1])
+                st = getattr(ds, 'SliceThickness', None)
+                if st is not None:
+                    slice_thickness = float(st)
+                patient_id = str(getattr(ds, 'PatientID', ''))
+                return (row_mm, col_mm), slice_thickness, patient_id
+            except Exception:
+                continue
+    return (row_mm, col_mm), slice_thickness, patient_id
+
 def to_display(img_tensor):
     img = img_tensor.detach().cpu().numpy()
     img = ((img + 1.0) / 2.0).clip(0.0, 1.0)
@@ -189,7 +212,10 @@ def build_sr_volume_from_lr(lr_volume, model, batch_size: int = 8):
 	with torch.no_grad():
 		for i in range(0, slices, max(1, batch_size)):
 			batch = lr_volume[i:i+batch_size]  # [B,1,h,w]
-			with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+			if device.type == 'cuda':
+				with torch.amp.autocast('cuda'):
+					y = model(batch.to(device))  # [B,1,H,W]
+			else:
 				y = model(batch.to(device))  # [B,1,H,W]
 			outs.append(y.cpu())
 	return torch.cat(outs, dim=0)  # [D,1,H,W]
@@ -197,7 +223,8 @@ def build_sr_volume_from_lr(lr_volume, model, batch_size: int = 8):
 
 class ViewerLRSRHR:
     def __init__(self, lr_volume, sr_volume, hr_volume, scale=2, lin_volume=None, bic_volume=None, *,
-                 dicom_folder=None, preset_name="soft_tissue", model=None, device=None):
+                 dicom_folder=None, preset_name="soft_tissue", model=None, device=None,
+                 pixel_spacing_mm=None, slice_thickness_mm=None, patient_id=''):
         self.lr = lr_volume
         self.sr = sr_volume
         self.hr = hr_volume
@@ -208,6 +235,11 @@ class ViewerLRSRHR:
         self.preset_name = preset_name
         self.model = model
         self.device = device
+        # metadata
+        self.ps_row_mm = None if pixel_spacing_mm is None else pixel_spacing_mm[0]
+        self.ps_col_mm = None if pixel_spacing_mm is None else pixel_spacing_mm[1]
+        self.slice_thickness_mm = slice_thickness_mm
+        self.patient_id = patient_id
         D, _, _, _ = self.hr.shape
         self.index = 0  # Start bei Index 0 (erste Schicht)
         print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
@@ -235,6 +267,9 @@ class ViewerLRSRHR:
         self.im_hr = None
         self.text = self.fig.text(0.5, 0.02, '', ha='center', va='bottom')
         self.text_stats = self.fig.text(0.5, 0.97, '', ha='center', va='top')
+        # info top, metrics will be placed below with spacing
+        self.text_info = self.fig.text(0.02, 0.995, '', ha='left', va='top', family='monospace')
+        self.text_roi = self.fig.text(0.02, 0.10, '', ha='left', va='top', family='monospace')
         self.metric_texts = []
 
         self.roi = None  # (x0,y0,x1,y1) in HR coordinate space
@@ -257,17 +292,17 @@ class ViewerLRSRHR:
         self.btn_roi.on_clicked(reset_roi_click)
         # Preset selection (radio buttons)
         preset_labels = list(WINDOW_PRESETS.keys())
-        ax_radio = self.fig.add_axes([0.01, 0.14, 0.12, 0.40])
+        ax_radio = self.fig.add_axes([0.01, 0.14, 0.09, 0.40])
         self.radio_presets = RadioButtons(ax_radio, preset_labels, active=preset_labels.index(self.preset_name) if self.preset_name in preset_labels else 0)
         def on_preset(label):
             self.apply_new_window(preset=label)
         self.radio_presets.on_clicked(on_preset)
         # Text boxes for WL/WW and apply
-        ax_wl = self.fig.add_axes([0.15, 0.02, 0.10, 0.06])
-        ax_ww = self.fig.add_axes([0.27, 0.02, 0.10, 0.06])
+        ax_wl = self.fig.add_axes([0.15, 0.02, 0.08, 0.05])
+        ax_ww = self.fig.add_axes([0.25, 0.02, 0.08, 0.05])
         self.txt_wl = TextBox(ax_wl, 'WL', initial=str(WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['center']))
         self.txt_ww = TextBox(ax_ww, 'WW', initial=str(WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['width']))
-        ax_apply = self.fig.add_axes([0.39, 0.02, 0.12, 0.06])
+        ax_apply = self.fig.add_axes([0.35, 0.02, 0.10, 0.05])
         self.btn_apply = Button(ax_apply, 'Apply WW')
         def apply_manual(event):
             try:
@@ -338,6 +373,15 @@ class ViewerLRSRHR:
         else:
             self.im_hr.set_data(img_hr)
 
+        # Info panel (always visible)
+        info_parts = []
+        if self.patient_id:
+            info_parts.append(f"PatientID: {self.patient_id}")
+        if self.slice_thickness_mm is not None:
+            info_parts.append(f"Slice Thickness: {self.slice_thickness_mm:.2f} mm")
+        if self.ps_row_mm and self.ps_col_mm:
+            info_parts.append(f"PixelSpacing: {self.ps_row_mm:.3f} x {self.ps_col_mm:.3f} mm")
+        self.text_info.set_text(' | '.join(info_parts))
         self.text.set_text(f'Index: {clamped_idx}/{axis_len-1}')
 
         # If no ROI is active, ensure axes show full images explicitly
@@ -355,10 +399,32 @@ class ViewerLRSRHR:
         # Determine ROI arrays for metrics (crop if ROI exists) using non-displayed tensors to avoid previous crops
         x0i = y0i = x1i = y1i = None
         H, W = self.hr.shape[-2:]
+        # Always show ROI status line; if no ROI, treat as full image
         if self.roi:
             x0, y0, x1, y1 = self.roi
-            x0i, x1i = int(round(max(0, min(x0, W-1)))), int(round(max(0, min(x1, W))))
-            y0i, y1i = int(round(max(0, min(y0, H-1)))), int(round(max(0, min(y1, H))))
+        else:
+            x0, y0, x1, y1 = 0, 0, W, H
+        x0i, x1i = int(round(max(0, min(x0, W-1)))), int(round(max(0, min(x1, W))))
+        y0i, y1i = int(round(max(0, min(y0, H-1)))), int(round(max(0, min(y1, H))))
+        # ROI overlay text with px and mm + ROI FOV; also include LR resolution
+        w_px = max(0, x1i - x0i)
+        h_px = max(0, y1i - y0i)
+        if self.ps_row_mm and self.ps_col_mm:
+            w_mm = w_px * self.ps_col_mm
+            h_mm = h_px * self.ps_row_mm
+            fov_w_mm = W * self.ps_col_mm
+            fov_h_mm = H * self.ps_row_mm
+            roi_text = f"ROI HR: ({x0i},{y0i})-({x1i},{y1i}) px | {w_px}x{h_px} px | ROI FOV {w_mm:.1f}x{h_mm:.1f} mm | Global FOV {fov_w_mm:.1f}x{fov_h_mm:.1f} mm"
+        else:
+            roi_text = f"ROI HR: ({x0i},{y0i})-({x1i},{y1i}) px | {w_px}x{h_px} px"
+        # map to LR coords (may be fractional due to scale; display as-is)
+        x0_lr = x0i / float(self.scale)
+        y0_lr = y0i / float(self.scale)
+        x1_lr = x1i / float(self.scale)
+        y1_lr = y1i / float(self.scale)
+        lr_h, lr_w = self.lr.shape[-2:]
+        roi_text += f" | mapped LR: ({x0_lr:.2f},{y0_lr:.2f})-({x1_lr:.2f},{y1_lr:.2f}) | LR res: {lr_w}x{lr_h} px"
+        self.text_roi.set_text(roi_text)
 
         def crop_roi_full(vol):
             t = vol[clamped_idx, 0]
@@ -409,35 +475,39 @@ class ViewerLRSRHR:
             'PI': min(by_metric['PI'], key=by_metric['PI'].get),
         }
 
-        # Layout metric lines under each other (three full rows with all values, best ones green)
-        y0_text = 0.97
-        dy = 0.045
+        # Layout metric labels and values in one row; best ones green
+        # Headers with left column label
+        header_y = 0.965
+        def put_header(x, txt):
+            self.metric_texts.append(self.fig.text(x, header_y, txt, ha='left', va='top', family='monospace', color='black'))
+        put_header(0.02, "Metrics")
+        put_header(0.06, "MSE ↓")
+        put_header(0.16, "RMSE ↓")
+        put_header(0.28, "MAE ↓")
+        put_header(0.38, "PSNR ↑")
+        put_header(0.50, "SSIM ↑")
+        put_header(0.62, "LPIPS ↓")
+        put_header(0.74, "PI ↓")
+
+        y0_text = 0.93
+        dy = 0.047
         for i, name in enumerate(['SR', 'Linear', 'Bicubic']):
             if name not in metrics:
                 continue
             mse_val, rmse_val, mae_val, psnr_val, ssim_val, lpips_val, pi_val = metrics[name]
-            # create separate text artists to color best values
-            x_start = 0.02
+            # single row per method with columns in the specified order
             y = y0_text - i*dy
-            label = self.fig.text(x_start, y, f"{name}:", ha='left', va='top', family='monospace', color='black')
-            self.metric_texts.append(label)
-            # columns - jetzt 5 Metriken
-            def add_val(x, txt, is_best):
+            def put_val(x, value, is_best, fmt):
                 color = 'green' if is_best else 'black'
-                self.metric_texts.append(self.fig.text(x, y, txt, ha='left', va='top', color=color, family='monospace'))
-            add_val(0.10, f"MSE={mse_val:.6f}", name == best['MSE'])
-            add_val(0.25, f"RMSE={rmse_val:.6f}", name == best['RMSE'])
-            add_val(0.40, f"MAE={mae_val:.6f}", name == best['MAE'])  # MAE hinzugefügt
-            add_val(0.55, f"PSNR={psnr_val:.2f}dB", name == best['PSNR'])
-            add_val(0.70, f"SSIM={ssim_val:.4f}", name == best['SSIM'])
-            # second row for LPIPS/PI to avoid overlap
-            y2 = y - 0.022
-            self.metric_texts.append(self.fig.text(0.02, y2, "", ha='left', va='top', family='monospace', color='black'))
-            def add_val2(x, txt, is_best):
-                color = 'green' if is_best else 'black'
-                self.metric_texts.append(self.fig.text(x, y2, txt, ha='left', va='top', color=color, family='monospace'))
-            add_val2(0.10, f"LPIPS={lpips_val:.4f}", name == best['LPIPS'])
-            add_val2(0.30, f"PI={pi_val:.3f}", name == best['PI'])
+                self.metric_texts.append(self.fig.text(x, y, fmt.format(value), ha='left', va='top', color=color, family='monospace'))
+            self.metric_texts.append(self.fig.text(0.02, y, f"{name}", ha='left', va='top', family='monospace', color='black'))
+            put_val(0.06, mse_val, name == best['MSE'], "{:.6f}")
+            put_val(0.16, rmse_val, name == best['RMSE'], "{:.6f}")
+            put_val(0.28, mae_val, name == best['MAE'], "{:.6f}")
+            put_val(0.38, psnr_val, name == best['PSNR'], "{:.2f}")
+            put_val(0.50, ssim_val, name == best['SSIM'], "{:.4f}")
+            put_val(0.62, lpips_val, name == best['LPIPS'], "{:.4f}")
+            put_val(0.74, pi_val, name == best['PI'], "{:.3f}")
         self._images_ready = True
         self.fig.canvas.draw_idle()
 
@@ -448,8 +518,9 @@ class ViewerLRSRHR:
         elif event.button == 'down':
             step = -1
         old_index = self.index
-        self.index += step
         D, _, _, _ = self.hr.shape
+        # clamp index strictly within [0, D-1]
+        self.index = int(np.clip(self.index + step, 0, D - 1))
         print(f"[Scroll] Slice {old_index} -> {self.index} (0 = last loaded slice, {D-1} = first loaded slice)")
         self.update()
 
@@ -474,13 +545,13 @@ class ViewerLRSRHR:
             # Previous slice (höherer Index)
             D, _, _, _ = self.hr.shape
             if self.index < D - 1:
-                self.index += 1
+                self.index = min(self.index + 1, D - 1)
                 print(f"[Key] Previous -> Slice {self.index}")
                 self.update()
         elif event.key in ['right', 'down']:
             # Next slice (niedrigerer Index)
             if self.index > 0:
-                self.index -= 1
+                self.index = max(self.index - 1, 0)
                 print(f"[Key] Next -> Slice {self.index}")
                 self.update()
 
@@ -730,7 +801,7 @@ def main():
     parser.add_argument('--model_path', type=str, default='rrdb_ct_best.pth', help='Path to trained model weights')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
-    parser.add_argument('--sr_batch', type=int, default=8, help='Batch size for batched SR inference (speed up GUI)')
+    parser.add_argument('--sr_batch', type=int, default=20, help='Batch size for batched SR inference (speed up GUI)')
     # Degradation flags (default blurnoise)
     parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation (default: blurnoise)')
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
@@ -750,6 +821,8 @@ def main():
     model.eval()
 
     hr_vol = load_ct_volume(args.dicom_folder, preset=args.preset)
+    # read DICOM metadata for pixel spacing, thickness, patient id
+    (row_mm, col_mm), slice_thickness, patient_id = read_series_metadata(args.dicom_folder)
     hr_vol = center_crop_to_multiple(hr_vol, args.scale)
     print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
     lr_vol = build_lr_volume_from_hr(
@@ -767,8 +840,19 @@ def main():
     lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
     bic_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bicubic', align_corners=False)
 
-    viewer = ViewerLRSRHR(lr_vol, sr_vol, hr_vol, scale=args.scale, lin_volume=lin_vol, bic_volume=bic_vol,
-                          dicom_folder=args.dicom_folder, preset_name=args.preset, model=model, device=device)
+    viewer = ViewerLRSRHR(
+        lr_vol, sr_vol, hr_vol,
+        scale=args.scale,
+        lin_volume=lin_vol,
+        bic_volume=bic_vol,
+        dicom_folder=args.dicom_folder,
+        preset_name=args.preset,
+        model=model,
+        device=device,
+        pixel_spacing_mm=(row_mm, col_mm) if (row_mm is not None and col_mm is not None) else None,
+        slice_thickness_mm=slice_thickness,
+        patient_id=patient_id,
+    )
     print('Navigation: Mouse wheel or arrow keys to navigate slices')
     print('Keyboard shortcuts: Home (first loaded slice), End (last loaded slice), Arrow keys (previous/next)')
     print('Note: Slices are now reverse-indexed (0 = last loaded slice, highest index = first loaded slice, like in Slicer 3D)')
