@@ -45,6 +45,31 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                    noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
     ensure_dir(output_dir)
 
+    # Persist complete evaluation configuration for reproducibility
+    eval_config = {
+        'root_folder': root_folder,
+        'split': split_name,
+        'model_path': model_path,
+        'output_dir': output_dir,
+        'device': device,
+        'scale': scale,
+        'normalization': normalization,
+        'hu_clip': hu_clip,
+        'preset': preset,
+        'window_center': window_center,
+        'window_width': window_width,
+        'max_patients': max_patients,
+        'max_slices_per_patient': max_slices_per_patient,
+        'slice_sampling': slice_sampling,
+        'seed': seed,
+        'degradation': degradation,
+        'blur_sigma_range': blur_sigma_range,
+        'blur_kernel': blur_kernel,
+        'noise_sigma_range_norm': noise_sigma_range_norm,
+        'dose_factor_range': dose_factor_range,
+        'antialias_clean': antialias_clean,
+    }
+
     # Prepare model
     device_t = torch.device(device if (device == 'cuda' and torch.cuda.is_available()) else 'cpu')
     model = RRDBNet_CT(scale=scale).to(device_t)
@@ -215,6 +240,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             'csv': csv_path,
             'json': json_path
         },
+        'config': eval_config,
         'global_per_slice': global_summary,
         'per_patient': per_patient_summary,
         'patient_level_aggregate': patient_level_agg
