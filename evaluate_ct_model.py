@@ -79,12 +79,13 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
     # Output files include model name tag and normalization tag; also append split suffix for clarity
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
-    suffix = f"_on_{split_name}_set"
+    limited = (max_patients is not None) or (max_slices_per_patient is not None)
+    suffix = f"_on_{'limited_' if limited else ''}{split_name}_set"
     csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}__{norm_tag}{suffix}.csv")
     json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}__{norm_tag}{suffix}.json")
 
     # Collect per-slice metrics and per-patient aggregations
-    fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'PI']
+    fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']
     rows = []
     patient_to_method_metrics = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
@@ -139,10 +140,12 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                         'method': method_name,
                         'MSE': float(metrics['MSE']),
                         'RMSE': float(metrics['RMSE']),
-                        'MAE': float(metrics['MAE']),  # MAE hinzugefügt
+                        'MAE': float(metrics['MAE']),
                         'PSNR': float(metrics['PSNR']),
                         'SSIM': float(metrics['SSIM']),
                         'LPIPS': float(metrics.get('LPIPS', float('nan'))),
+                        'MA': float(metrics.get('MA', float('nan'))),
+                        'NIQE': float(metrics.get('NIQE', float('nan'))),
                         'PI': float(metrics.get('PI', float('nan')))
                     })
                     for metric_name, metric_value in metrics.items():
@@ -168,7 +171,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     global_by_method = defaultdict(lambda: defaultdict(list))
     for r in rows:
         method_name = r['method']
-        for metric_name in ['MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'PI']:
+        for metric_name in ['MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']:
             global_by_method[method_name][metric_name].append(float(r[metric_name]))
 
     global_summary = {}
@@ -195,7 +198,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         methods.update(per_patient_summary[patient_id].keys())
     for method_name in methods:
         patient_level_agg[method_name] = {}
-        for metric_name in ['MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'PI']:
+        for metric_name in ['MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']:
             patient_means = []
             for patient_id in per_patient_summary:
                 if method_name in per_patient_summary[patient_id]:

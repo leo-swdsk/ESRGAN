@@ -39,12 +39,19 @@ python finetune_ct_sr.py --data_root "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\pre
 ### Evaluierung der Modellqualität (metrisch, CSV + JSON)
 - Standard: globale Normalisierung (HU‑Clip [-1000, 2000]) + Degradation `blurnoise`. Dateinamen enthalten Modell und Normalisierungs‑Tag.
 
+- Was wird gerechnet?
+  - Es werden ganze Slices ausgewertet (kein Random‑Crop). Falls Dimensionen nicht exakt passen (ungerade Pixelzahl o. ä.), wird zentriert so zugeschnitten, dass Referenz (HR) und Rekonstruktion (SR/Interpolation) dieselbe Größe haben.
+  - Metriken pro Slice: MSE, RMSE, MAE, PSNR, SSIM, LPIPS, PI. LPIPS und PI folgen derselben robusten Implementierung wie in `visualize_lr_sr_hr.py`:
+    - LPIPS: bevorzugt `pyiqa` (`create_metric('lpips')`), Fallback auf `lpips`‑Paket. Graustufen werden intern auf 3 Kanäle gemappt.
+    - PI: PI = 0.5*((10 − Ma) + NIQE). Bevorzugt `pyiqa`‑Metriken `nrqm` (Ma) und `niqe`. Falls nur NIQE verfügbar ist, wird NIQE als Surrogat‑PI ausgegeben, damit keine `nan` entstehen.
+  - CSV enthält alle Slice‑Ergebnisse; JSON fasst global pro Slice, pro Patient und über Patienten gemittelt zusammen.
+
 - Beispiel (Global HU‑Clip, Val-Split, schneller Lauf):
 ```bash
 python evaluate_ct_model.py \
   --root "preprocessed_data" \
   --split val \
-  --model_path rrdb_x2_blurnoise_best.pth \
+  --model_path finetune_outputs\best.pth \
   --normalization global --hu_clip -1000 2000 \
   --max_patients 3 --max_slices_per_patient 20 --slice_sampling random \
   --degradation blurnoise --dose_factor_range 0.25 0.5 --seed 42
@@ -55,7 +62,7 @@ python evaluate_ct_model.py \
 python evaluate_ct_model.py \
   --root "preprocessed_data" \
   --split val \
-  --model_path rrdb_x2_blurnoise_best.pth \
+  --model_path finetune_outputs\best.pth \
   --normalization window --preset soft_tissue --window_center 40 --window_width 400 \
   --degradation blurnoise --seed 42
 ```
@@ -68,6 +75,14 @@ python evaluate_ct_model.py \
 ```bash
 python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path rrdb_x2_blurnoise_best.pth --device cpu
 ```
+
+- Abhängigkeiten für LPIPS/PI:
+  - Empfohlen: `pip install pyiqa` (liefert LPIPS, NIQE und Ma/NRQM). Alternativ für LPIPS: `pip install lpips`.
+  - Falls `pyiqa` ohne Ma/NRQM installiert ist, wird PI ohne Ma berechnet (Surrogat = NIQE), damit keine `nan`‑Werte entstehen.
+  - Alle Metriken werden auf Bildwerten in [0,1] berechnet; die Eingaben werden intern korrekt aus [-1,1] umskaliert.
+
+- Hinweis zu vollen Slices und Zuschnitt:
+  - Für die Evaluierung werden die HR‑Slices (und die SR/Interpolation) ggf. zentriert zugeschnitten, um exakte Größenübereinstimmung zu garantieren. Das ist bei ungeraden Dimensionen oder leichten Abweichungen normal und beabsichtigt.
 
 ### Visualisierung
 - LR vs HR (ganze Slices, interaktive Ansicht: axial/coronal/sagittal)
@@ -153,8 +168,14 @@ Standard: `--degradation blurnoise`. Ziel ist die realistischere Simulation eine
     ```
   - `evaluate_ct_model.py` (metrische Auswertung, Default blurnoise):
     ```bash
-    python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path rrdb_x2_blurnoise_best.pth --degradation blurnoise --dose_factor_range 0.25 0.5
+    python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --degradation blurnoise --dose_factor_range 0.25 0.5
     ```
+- `evaluate_ct_model.py` (metrische Auswertung, Default blurnoise, also gleich wie oben, nur auf einem Patienten zum Testen, ob alle Metriken korrekt berechnet werden):
+    ```bash
+    python evaluate_ct_model.py --root preprocessed_data --split val --model_path finetune_outputs\best.pth --max_patients 1
+    ```
+
+
     Hinweis: Setze hier die gleichen Degradationsparameter wie im Training.
   - `visualize_lr_hr.py` (LR vs HR, Default blurnoise):
     ```bash

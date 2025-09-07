@@ -9,10 +9,10 @@ import math
 import warnings
 
 # Optional metrics: LPIPS (full-reference) and Perceptual Index (PI = 0.5*((10-Ma)+NIQE))
-_lpips_model = None
-_pyiqa_lpips = None
-_piqa_niqe = None
-_piqa_ma = None
+_lpips_model = None  # fallback lpips package model (moved to current device lazily)
+_pyiqa_lpips_by_device = {}  # device(str)->metric
+_piqa_niqe_by_device = {}
+_piqa_ma_by_device = {}
 _warned_lpips = False
 _warned_pi = False
 try:
@@ -38,20 +38,29 @@ def upsample_interpolation(lr_tensor, target_size, method="bilinear"):
     img_up = cv2.resize(img_np, dsize=(target_size[1], target_size[0]), interpolation=mode)
     return torch.tensor(img_up).unsqueeze(0)
 
-def _ensure_lpips_model():
-    """Prefer pyiqa's LPIPS (newer API), fallback to lpips package."""
-    global _pyiqa_lpips, _lpips_model, _warned_lpips
+def _ensure_lpips_model(target_device: torch.device):
+    """Prefer pyiqa's LPIPS (newer API), fallback to lpips package. Creates per-device instance."""
+    global _pyiqa_lpips_by_device, _lpips_model, _warned_lpips
+    dev_key = str(target_device)
     if _pyiqa is not None:
-        if _pyiqa_lpips is None:
+        metric = _pyiqa_lpips_by_device.get(dev_key)
+        if metric is None:
             try:
-                _pyiqa_lpips = _pyiqa.create_metric('lpips')
-                _pyiqa_lpips.eval()
+                # Explicit net and device to avoid implicit downloads/device mismatch
+                metric = _pyiqa.create_metric('lpips', device=dev_key, net='alex')
+                metric.eval()
+                _pyiqa_lpips_by_device[dev_key] = metric
             except Exception:
-                _pyiqa_lpips = None
-        if _pyiqa_lpips is not None:
-            return _pyiqa_lpips
+                metric = None
+        if metric is not None:
+            return metric
     # fallback to original lpips
     if _lpips_model is not None:
+        # move to target device if necessary
+        try:
+            _lpips_model = _lpips_model.to(target_device)
+        except Exception:
+            pass
         return _lpips_model
     if _lpips is None:
         if not _warned_lpips:
@@ -60,6 +69,10 @@ def _ensure_lpips_model():
         return None
     try:
         _lpips_model = _lpips.LPIPS(net='alex')
+        try:
+            _lpips_model = _lpips_model.to(target_device)
+        except Exception:
+            pass
         _lpips_model.eval()
     except Exception:
         _lpips_model = None
@@ -70,40 +83,62 @@ def _ensure_lpips_model():
 
 def _compute_lpips(sr_tensor, hr_tensor):
     # Inputs: [1,H,W] in [-1,1]
-    model = _ensure_lpips_model()
+    # Select target device based on input tensors (prefer CUDA if any input is on CUDA)
+    target_device = sr_tensor.device if sr_tensor.is_cuda else (hr_tensor.device if hr_tensor.is_cuda else torch.device('cpu'))
+    model = _ensure_lpips_model(target_device)
     if model is None:
+        print("[LPIPS] model not available; returning NaN")
         return float('nan')
     try:
         with torch.no_grad():
-            if _pyiqa is not None and model is _pyiqa_lpips:
+            if _pyiqa is not None and str(type(model)).find('pyiqa') != -1:
                 # pyiqa expects [B,C,H,W] in [0,1] (it will internally normalize)
                 def to01_3(x):
-                    x01 = (x + 1.0) * 0.5
-                    x3 = x01.unsqueeze(0).repeat(1,3,1,1)  # [1,3,H,W]
+                    x01 = torch.clamp(x.float(), -1.0, 1.0)
+                    x01 = (x01 + 1.0) * 0.5
+                    x3 = x01.unsqueeze(0).repeat(1,3,1,1).contiguous()  # [1,3,H,W]
                     return x3
-                d = model(to01_3(sr_tensor), to01_3(hr_tensor))
+                x_s = to01_3(sr_tensor).to(target_device)
+                x_h = to01_3(hr_tensor).to(target_device)
+                d = model(x_s, x_h)
+                val = float(d.item())
+                print(f"[LPIPS] backend=pyiqa value={val:.4f}")
             else:
                 # lpips package expects [-1,1] 3ch
                 def to_m11_3(x):
-                    x3 = x.clone().repeat(3, 1, 1)
-                    return x3.unsqueeze(0)
-                d = model(to_m11_3(sr_tensor), to_m11_3(hr_tensor))
-        return float(d.item())
+                    x_m11 = torch.clamp(x.float(), -1.0, 1.0)
+                    x3 = x_m11.repeat(3, 1, 1)
+                    return x3.unsqueeze(0).contiguous()
+                xs = to_m11_3(sr_tensor).to(target_device)
+                xh = to_m11_3(hr_tensor).to(target_device)
+                d = model(xs, xh)
+                val = float(d.item())
+                backend = 'lpips-pkg' if _lpips is not None else 'unknown'
+                print(f"[LPIPS] backend={backend} value={val:.4f}")
+        return val
     except Exception:
+        print("[LPIPS] computation failed; returning NaN")
         return float('nan')
 
-def _ensure_pi_metrics():
-    global _piqa_niqe, _piqa_ma, _warned_pi
-    if _piqa_niqe is not None and _piqa_ma is not None:
-        return _piqa_niqe, _piqa_ma
-    if _pyiqa is not None:
+def _ensure_pi_metrics(target_device: torch.device):
+    global _piqa_niqe_by_device, _piqa_ma_by_device, _warned_pi
+    dev_key = str(target_device)
+    niqe = _piqa_niqe_by_device.get(dev_key)
+    ma = _piqa_ma_by_device.get(dev_key)
+    if (niqe is None or ma is None) and _pyiqa is not None:
         try:
-            _piqa_niqe = _pyiqa.create_metric('niqe')
-            _piqa_ma = _pyiqa.create_metric('nrqm')  # Ma-Score in pyiqa heißt 'nrqm'
+            if niqe is None:
+                niqe = _pyiqa.create_metric('niqe', device=dev_key)
+                niqe.eval()
+                _piqa_niqe_by_device[dev_key] = niqe
+            if ma is None:
+                ma = _pyiqa.create_metric('nrqm', device=dev_key)
+                ma.eval()
+                _piqa_ma_by_device[dev_key] = ma
         except Exception:
-            _piqa_niqe = None
-            _piqa_ma = None
-    if (_piqa_niqe is None or _piqa_ma is None) and not _warned_pi:
+            # leave niqe/ma as is; may be None
+            pass
+    if (_piqa_niqe_by_device.get(dev_key) is None or _piqa_ma_by_device.get(dev_key) is None) and not _warned_pi:
         msg = "[Metrics] PI requires NIQE and Ma."
         if _pyiqa is None:
             msg += " Install pyiqa for NIQE/Ma (pip install pyiqa)."
@@ -113,42 +148,94 @@ def _ensure_pi_metrics():
             msg += " skimage.niqe also not available."
         print(msg)
         _warned_pi = True
-    return _piqa_niqe, _piqa_ma
+    return _piqa_niqe_by_device.get(dev_key), _piqa_ma_by_device.get(dev_key)
 
 def _compute_pi(grayscale_tensor_m1_1):
-    # PI = 0.5*((10 - Ma) + NIQE). Compute on the reconstructed image only.
-    # Input: [1,H,W] in [-1,1]
-    # Convert to [0,1] and 3ch for Ma; NIQE often uses grayscale or color [0,1]
-    img01 = ((grayscale_tensor_m1_1.detach().cpu().numpy() + 1.0) / 2.0).clip(0.0, 1.0)
+    pi_val, _, _ = _compute_pi_with_components(grayscale_tensor_m1_1)
+    return pi_val
+
+def _compute_pi_with_components(grayscale_tensor_m1_1):
+    """
+    Input: [1,H,W] in [-1,1]  (ein Slice, 1 Kanal)
+    Return: (PI, MA, NIQE)
+    """
+    # Ziel-Device nach Verfügbarkeit
+    target_device = grayscale_tensor_m1_1.device if grayscale_tensor_m1_1.is_cuda else torch.device('cpu')
+    piqa_niqe, piqa_ma = _ensure_pi_metrics(target_device)
+
+    # [-1,1] -> [0,1], robust auf Dimensionen
+    x = grayscale_tensor_m1_1.detach().to(torch.float32)
+    if x.ndim == 2:           # [H,W] -> [1,H,W]
+        x = x.unsqueeze(0)
+    assert x.ndim == 3, f"expected [1,H,W], got {tuple(x.shape)}"
+    x01 = ((x + 1.0) / 2.0).clamp(0.0, 1.0)  # [1,H,W]
+    x01 = x01.unsqueeze(0)                   # -> [1,1,H,W]  (B=1,C=1,H,W)
+
     niqe_val = float('nan')
-    ma_val = float('nan')
-    # Try pyiqa first (resize to typical backbone input to avoid NaNs)
-    piqa_niqe, piqa_ma = _ensure_pi_metrics()
+    ma_val   = float('nan')
+
     try:
+        # -------- NIQE (1ch, Originalgröße; <96 px sanft hochskalieren) --------
         if piqa_niqe is not None:
-            # NIQE: compute on native grayscale size [B,1,H,W] in [0,1]
-            x_gray = torch.tensor(img01, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+            H, W = x01.shape[-2:]
+            if min(H, W) < 96:
+                s = 96.0 / float(min(H, W))
+                newH, newW = int(round(H*s)), int(round(W*s))
+                x_niqe = torch.nn.functional.interpolate(
+                    x01, size=(newH,newW), mode='bilinear', align_corners=False
+                )
+            else:
+                x_niqe = x01
+            dev_niqe = next(piqa_niqe.parameters()).device if hasattr(piqa_niqe, 'parameters') else torch.device('cpu')
             with torch.no_grad():
-                niqe_val = float(piqa_niqe(x_gray).item())
+                niqe_val = float(piqa_niqe(x_niqe.to(dev_niqe)).item())
+
         elif _skimage_niqe is not None:
-            niqe_val = float(_skimage_niqe(img01.astype(np.float64)))
-    except Exception:
+            # skimage erwartet 2D [H,W] float in [0,1]
+            niqe_val = float(_skimage_niqe(x01.squeeze(0).squeeze(0).cpu().numpy().astype('float64')))
+
+    except Exception as e:
+        # optional: print(f"[NIQE] error: {type(e).__name__}: {e}")
         pass
+
     try:
+        # -------- MA/NRQM (3ch, 224x224) --------
         if piqa_ma is not None:
-            x = torch.tensor(img01, dtype=torch.float32).unsqueeze(0)
-            x3 = x.repeat(1,3,1,1)
+            x_ma = x01.repeat(1, 3, 1, 1)  # [1,3,H,W]
+            x_ma = torch.nn.functional.interpolate(x_ma, size=(224,224), mode='bilinear', align_corners=False)
+            dev_ma = next(piqa_ma.parameters()).device if hasattr(piqa_ma, 'parameters') else torch.device('cpu')
             with torch.no_grad():
-                x3 = F.interpolate(x3, size=(224, 224), mode='bilinear', align_corners=False)
-                ma_val = float(piqa_ma(x3).item())
-    except Exception:
-        # When 'ma' not present in this pyiqa build, leave as NaN so PI becomes NaN (not NIQE)
+                ma_val = float(piqa_ma(x_ma.to(dev_ma)).item())
+
+    except Exception as e:
+        # optional: print(f"[MA/NRQM] error: {type(e).__name__}: {e}")
         pass
+
+    pi_val = float('nan')
     if math.isfinite(niqe_val) and math.isfinite(ma_val):
-        return float(0.5 * ((10.0 - ma_val) + niqe_val))
-    return float('nan')
+        pi_val = float(0.5 * ((10.0 - ma_val) + niqe_val))
+
+    print(f"[PI-Debug] NIQE={niqe_val if math.isfinite(niqe_val) else float('nan'):.4f} "
+          f"MA={ma_val if math.isfinite(ma_val) else float('nan'):.4f} -> PI={pi_val if math.isfinite(pi_val) else float('nan'):.4f}")
+    return pi_val, ma_val, niqe_val
+
 
 def evaluate_metrics(sr_tensor, hr_tensor):
+    # Ensure same spatial size by center-cropping to common dimensions if needed
+    def center_crop_to_common(a, b):
+        Ha, Wa = a.shape[-2], a.shape[-1]
+        Hb, Wb = b.shape[-2], b.shape[-1]
+        Hc, Wc = min(Ha, Hb), min(Wa, Wb)
+        def cc(x):
+            Hx, Wx = x.shape[-2], x.shape[-1]
+            y0 = max(0, (Hx - Hc) // 2)
+            x0 = max(0, (Wx - Wc) // 2)
+            return x[..., y0:y0+Hc, x0:x0+Wc]
+        return cc(a), cc(b)
+
+    if sr_tensor.shape[-2:] != hr_tensor.shape[-2:]:
+        sr_tensor, hr_tensor = center_crop_to_common(sr_tensor, hr_tensor)
+
     sr_np = sr_tensor.squeeze().cpu().numpy()
     hr_np = hr_tensor.squeeze().cpu().numpy()
 
@@ -190,11 +277,12 @@ def evaluate_metrics(sr_tensor, hr_tensor):
     except Exception:
         lpips_val = float('nan')
 
-    # PI on SR only
+    # PI (and components) on SR only
+    print("[PI] using _compute_pi_with_components")
     try:
-        pi_val = _compute_pi(sr_tensor)
+        pi_val, ma_score, niqe_score = _compute_pi_with_components(sr_tensor)
     except Exception:
-        pi_val = float('nan')
+        pi_val, ma_score, niqe_score = float('nan'), float('nan'), float('nan')
 
     return {
         "MSE": mse_val,
@@ -203,6 +291,8 @@ def evaluate_metrics(sr_tensor, hr_tensor):
         "PSNR": psnr_val,
         "SSIM": ssim_val,
         "LPIPS": lpips_val,
+        "MA": ma_score,
+        "NIQE": niqe_score,
         "PI": pi_val
     }
 
@@ -219,11 +309,32 @@ def compare_methods(lr_tensor, hr_tensor, model):
         sr_linear = upsample_interpolation(lr_tensor, target_size, method="bilinear")
         sr_cubic = upsample_interpolation(lr_tensor, target_size, method="bicubic")
 
-        # Metrics berechnen
+        # Safety: if model SR size differs from HR due to odd dimensions, center-crop all to common size
+        def cc_common(x, ref):
+            Hx, Wx = x.shape[-2:]
+            Hr, Wr = ref.shape[-2:]
+            Hc, Wc = min(Hx, Hr), min(Wx, Wr)
+            def cc(t):
+                Ht, Wt = t.shape[-2:]
+                y0 = max(0, (Ht - Hc) // 2)
+                x0 = max(0, (Wt - Wc) // 2)
+                return t[..., y0:y0+Hc, x0:x0+Wc]
+            return cc(x), cc(ref)
+
+        sr_m, hr_m = (sr_model, hr_tensor)
+        if sr_model.shape[-2:] != hr_tensor.shape[-2:]:
+            sr_m, hr_m = cc_common(sr_model, hr_tensor)
+        # Align interpolations to hr_m as well
+        if sr_linear.shape[-2:] != hr_m.shape[-2:]:
+            sr_linear, _ = cc_common(sr_linear, hr_m)
+        if sr_cubic.shape[-2:] != hr_m.shape[-2:]:
+            sr_cubic, _ = cc_common(sr_cubic, hr_m)
+
+        # Compute metrics
         results = {
-            "Model (RRDB)": evaluate_metrics(sr_model, hr_tensor),
-            "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_tensor),
-            "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_tensor)
+            "Model (RRDB)": evaluate_metrics(sr_m, hr_m),
+            "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_m),
+            "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_m)
         }
 
         return results
