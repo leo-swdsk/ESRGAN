@@ -156,7 +156,14 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
             for s_idx in indices:
                 lr, hr = ds[s_idx]
-                results = compare_methods(lr, hr, model)
+                results = compare_methods(
+                    lr, hr, model,
+                    normalization=normalization,
+                    hu_clip=hu_clip,
+                    window_center=window_center,
+                    window_width=window_width,
+                    metrics_device=('cuda' if (device_t.type == 'cuda' and torch.cuda.is_available()) else 'cpu')
+                )
 
                 for method_name, metrics in results.items():
                     rows.append({

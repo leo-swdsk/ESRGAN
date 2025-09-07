@@ -7,6 +7,7 @@ from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import mean_squared_error
 import math
 import warnings
+from metrics_core import compute_all_metrics
 
 # Optional metrics: LPIPS (full-reference) and Perceptual Index (PI = 0.5*((10-Ma)+NIQE))
 _lpips_model = None  # fallback lpips package model (moved to current device lazily)
@@ -220,83 +221,31 @@ def _compute_pi_with_components(grayscale_tensor_m1_1):
     return pi_val, ma_val, niqe_val
 
 
-def evaluate_metrics(sr_tensor, hr_tensor):
-    # Ensure same spatial size by center-cropping to common dimensions if needed
-    def center_crop_to_common(a, b):
-        Ha, Wa = a.shape[-2], a.shape[-1]
-        Hb, Wb = b.shape[-2], b.shape[-1]
-        Hc, Wc = min(Ha, Hb), min(Wa, Wb)
-        def cc(x):
-            Hx, Wx = x.shape[-2], x.shape[-1]
-            y0 = max(0, (Hx - Hc) // 2)
-            x0 = max(0, (Wx - Wc) // 2)
-            return x[..., y0:y0+Hc, x0:x0+Wc]
-        return cc(a), cc(b)
+def _denorm_to_hu(x_m11, normalization, hu_clip, wl, ww):
+    # x_m11: [1,H,W] in [-1,1]
+    x01 = (x_m11.clamp(-1.0, 1.0) + 1.0) * 0.5
+    if normalization == 'global':
+        lo, hi = float(hu_clip[0]), float(hu_clip[1])
+        return x01 * (hi - lo) + lo
+    else:  # 'window'
+        min_val = float(wl) - float(ww) / 2.0
+        max_val = float(wl) + float(ww) / 2.0
+        return x01 * (max_val - min_val) + min_val
 
-    if sr_tensor.shape[-2:] != hr_tensor.shape[-2:]:
-        sr_tensor, hr_tensor = center_crop_to_common(sr_tensor, hr_tensor)
+def evaluate_metrics(sr_tensor, hr_tensor, normalization, hu_clip, window_center, window_width, metrics_device):
+    # -> HU
+    sr_hu = _denorm_to_hu(sr_tensor, normalization, hu_clip, window_center, window_width).squeeze(0)
+    hr_hu = _denorm_to_hu(hr_tensor, normalization, hu_clip, window_center, window_width).squeeze(0)
+    m = compute_all_metrics(sr_hu, hr_hu,
+                            mode='global', hu_clip=(-1000.0, 2000.0),
+                            lpips_backbone='alex', device=metrics_device,
+                            return_components=True)
+    return {k: float(m[k]) for k in ['MSE','RMSE','MAE','PSNR','SSIM','LPIPS','MA','NIQE','PI']}
 
-    sr_np = sr_tensor.squeeze().cpu().numpy()
-    hr_np = hr_tensor.squeeze().cpu().numpy()
-
-    # Rescale from [-1,1] to [0,1] for metrics; otherwise SSIM and my own PSNR calculation does not work correctly
-    sr_np = ((sr_np + 1) / 2).clip(0, 1)
-    hr_np = ((hr_np + 1) / 2).clip(0, 1)
-
-    # Robust MSE/PSNR without warnings for perfect matches
-    diff = hr_np.astype(np.float64) - sr_np.astype(np.float64)
-    mse_val = float(np.mean(diff * diff))
-    rmse_val = float(math.sqrt(mse_val))
-    mae_val = float(np.mean(np.abs(diff)))  
-    
-    if mse_val <= 0.0:
-        psnr_val = float('inf')
-    else:
-        psnr_val = float(10.0 * math.log10(1.0 / mse_val))
-    # Choose an adaptive odd win_size <= min(H,W) to avoid errors on small images
-    # Support [H,W] or [1,H,W]
-    if hr_np.ndim == 3 and hr_np.shape[0] == 1:
-        hr_np = hr_np[0]
-        sr_np = sr_np[0]
-    h, w = hr_np.shape
-    min_side = max(1, min(h, w))
-    # cap at 11 (common default upper bound); ensure odd and >=3
-    ws = min(11, min_side)
-    if ws % 2 == 0:
-        ws = max(3, ws - 1)
-    ws = max(3, ws)
-    try:
-        ssim_val = float(ssim(hr_np, sr_np, data_range=1.0, win_size=ws))
-    except Exception:
-        # Fallback: if still failing, return 0.0 to keep evaluation running
-        ssim_val = 0.0
-
-    # LPIPS on [-1,1] 3ch
-    try:
-        lpips_val = _compute_lpips(sr_tensor, hr_tensor)
-    except Exception:
-        lpips_val = float('nan')
-
-    # PI (and components) on SR only
-    print("[PI] using _compute_pi_with_components")
-    try:
-        pi_val, ma_score, niqe_score = _compute_pi_with_components(sr_tensor)
-    except Exception:
-        pi_val, ma_score, niqe_score = float('nan'), float('nan'), float('nan')
-
-    return {
-        "MSE": mse_val,
-        "RMSE": rmse_val,
-        "MAE": mae_val,  
-        "PSNR": psnr_val,
-        "SSIM": ssim_val,
-        "LPIPS": lpips_val,
-        "MA": ma_score,
-        "NIQE": niqe_score,
-        "PI": pi_val
-    }
-
-def compare_methods(lr_tensor, hr_tensor, model):
+def compare_methods(lr_tensor, hr_tensor, model,
+                    *, normalization='global', hu_clip=(-1000.0, 2000.0),
+                    window_center=40.0, window_width=400.0,
+                    metrics_device='cpu'):
     model.eval()
     with torch.no_grad():
         # Ensure model input is on the same device as model
@@ -332,12 +281,11 @@ def compare_methods(lr_tensor, hr_tensor, model):
 
         # Compute metrics
         results = {
-            "Model (RRDB)": evaluate_metrics(sr_m, hr_m),
-            "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_m),
-            "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_m)
-        }
-
-        return results
+        "Model (RRDB)": evaluate_metrics(sr_m, hr_m, normalization, hu_clip, window_center, window_width, metrics_device),
+        "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_m, normalization, hu_clip, window_center, window_width, metrics_device),
+        "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_m, normalization, hu_clip, window_center, window_width, metrics_device),
+    }
+    return results
 
 # Beispiel:
 if __name__ == "__main__":

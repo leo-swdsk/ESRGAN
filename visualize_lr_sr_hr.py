@@ -13,6 +13,7 @@ from ct_dataset_loader import is_ct_image_dicom
 from rrdb_ct_model import RRDBNet_CT
 from skimage.metrics import structural_similarity as ssim
 import io, contextlib
+from metrics_core import compute_all_metrics
 
 
 def apply_window_np(img, center, width):
@@ -76,6 +77,39 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
     vol = torch.stack(slice_list, dim=0)
     
     print(f"[CT-Loader] Loaded {vol.shape[0]} slices with dimensions {vol.shape[1:]} (Index 0 = last loaded slice, Index {vol.shape[0]-1} = first loaded slice)")
+    return vol
+
+
+def load_ct_volume_hu(folder_path):
+    slice_list = []
+    slice_paths = []
+    for root, _, files in os.walk(folder_path):
+        for f in sorted(files):
+            if not f.lower().endswith('.dcm'):
+                continue
+            path = os.path.join(root, f)
+            if not is_ct_image_dicom(path):
+                continue
+            slice_paths.append(path)
+    slice_paths.sort()
+    for path in slice_paths:
+        try:
+            ds = pydicom.dcmread(path, force=True)
+            arr = ds.pixel_array
+            hu = apply_modality_lut(arr, ds).astype(np.float32)
+            if hu.ndim == 2:
+                slice_list.append(torch.tensor(hu).unsqueeze(0))
+            elif hu.ndim == 3:
+                for k in range(hu.shape[0]):
+                    slice_list.append(torch.tensor(hu[k]).unsqueeze(0))
+        except Exception:
+            continue
+    if len(slice_list) == 0:
+        raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
+    H, W = slice_list[0].shape[-2:]
+    slice_list = [s for s in slice_list if s.shape[-2:] == (H, W)]
+    slice_list.reverse()
+    vol = torch.stack(slice_list, dim=0)
     return vol
 
 
@@ -220,16 +254,47 @@ def build_sr_volume_from_lr(lr_volume, model, batch_size: int = 8):
 			outs.append(y.cpu())
 	return torch.cat(outs, dim=0)  # [D,1,H,W]
 
+# ---------- Helper: HU <-> [-1,1] (global) & Anzeige-Fensterung ----------
+def hu_to_m11_global(x, lo=-1000.0, hi=2000.0):
+    x = x.to(torch.float32).clamp(lo, hi)
+    x01 = (x - lo) / (hi - lo)
+    return x01 * 2.0 - 1.0  # [-1,1]
+
+def m11_to_hu_global(x, lo=-1000.0, hi=2000.0):
+    x = x.to(torch.float32)
+    x01 = (x.clamp(-1.0, 1.0) + 1.0) * 0.5
+    return x01 * (hi - lo) + lo  # HU
+
+def hu_to_m11_window(x: torch.Tensor, wl: float, ww: float) -> torch.Tensor:
+    """Fenstert HU -> [-1,1] für die Anzeige (ohne Neuberechnung der SR)."""
+    x = x.to(torch.float32)
+    ww = float(ww)
+    wl = float(wl)
+    if ww <= 0:
+        raise ValueError(f"Window Width must be > 0, got {ww}")
+    min_val = wl - ww / 2.0
+    max_val = wl + ww / 2.0
+    x = x.clamp(min_val, max_val)
+    x01 = (x - min_val) / (max_val - min_val)
+    return x01 * 2.0 - 1.0  # [-1,1]
 
 class ViewerLRSRHR:
     def __init__(self, lr_volume, sr_volume, hr_volume, scale=2, lin_volume=None, bic_volume=None, *,
                  dicom_folder=None, preset_name="soft_tissue", model=None, device=None,
-                 pixel_spacing_mm=None, slice_thickness_mm=None, patient_id=''):
+                 pixel_spacing_mm=None, slice_thickness_mm=None, patient_id='',
+                 hr_hu_volume=None, sr_hu_volume=None, lin_hu_volume=None, bic_hu_volume=None,
+                 lr_hu_volume=None): 
         self.lr = lr_volume
         self.sr = sr_volume
         self.hr = hr_volume
         self.lin = lin_volume
         self.bic = bic_volume
+        # HU volumes for metrics
+        self.lr_hu = lr_hu_volume
+        self.hr_hu = hr_hu_volume
+        self.sr_hu = sr_hu_volume
+        self.lin_hu = lin_hu_volume
+        self.bic_hu = bic_hu_volume
         self.scale = scale
         self.dicom_folder = dicom_folder
         self.preset_name = preset_name
@@ -432,17 +497,53 @@ class ViewerLRSRHR:
                 return t[y0i:y1i, x0i:x1i]
             return t
 
-        hr_for_metrics = crop_roi_full(self.hr)
-        sr_for_metrics = crop_roi_full(self.sr)
-        lin_for_metrics = crop_roi_full(self.lin) if self.lin is not None else hr_for_metrics
-        bic_for_metrics = crop_roi_full(self.bic) if self.bic is not None else hr_for_metrics
+        # Prepare HU planes for metrics (identical ROI across methods)
+        def crop_roi_hu(vol):
+            t = vol[clamped_idx, 0]
+            if self.roi and x1i is not None and x1i > x0i and y1i > y0i:
+                return t[y0i:y1i, x0i:x1i]
+            return t
+
+        hr_hu = crop_roi_hu(self.hr_hu) if self.hr_hu is not None else None
+        sr_hu = crop_roi_hu(self.sr_hu) if self.sr_hu is not None else None
+        lin_hu = crop_roi_hu(self.lin_hu) if self.lin_hu is not None else None
+        bic_hu = crop_roi_hu(self.bic_hu) if self.bic_hu is not None else None
+        lr_hu = crop_roi_hu(self.lr_hu) if self.lr_hu is not None else None
+
+        # Debug domain logs
+        def _dbg(name, x):
+            if x is None:
+                return
+            print(f"[METDBG] {name}: shape={tuple(x.shape)} min={float(x.min()):.3f} max={float(x.max()):.3f} mean={float(x.mean()):.3f}")
+        _dbg("HR(HU)", hr_hu)
+        _dbg("SR(HU)", sr_hu)
+        _dbg("LIN(HU)", lin_hu)
+        _dbg("BIC(HU)", bic_hu)
+        _dbg("LR(HU)", lr_hu)
+
+        if hr_hu is not None and sr_hu is not None:
+            d_sr_hr = torch.mean(torch.abs(sr_hu - hr_hu)).item()
+            print(f"[METDBG] mean|SR-HR|={d_sr_hr:.6g}")
+            assert d_sr_hr > 1e-6, "SR≅HR → falsches Tensor beim Metrik-Call"
+        if hr_hu is not None and bic_hu is not None:
+            d_bic_hr = torch.mean(torch.abs(bic_hu - hr_hu)).item()
+            print(f"[METDBG] mean|BIC-HR|={d_bic_hr:.6g}")
+            assert d_bic_hr > 1e-6, "Bicubic≅HR → falsches Tensor beim Metrik-Call"
+        if hr_hu is not None and lin_hu is not None:
+            d_lin_hr = torch.mean(torch.abs(lin_hu - hr_hu)).item()
+            print(f"[METDBG] mean|LIN-HR|={d_lin_hr:.6g}")
+            assert d_lin_hr > 1e-4, "Linear≅HR → falsches Tensor beim Metrik-Call"
 
         metrics = {}
-        metrics['SR'] = self.compute_metrics(sr_for_metrics, hr_for_metrics)
-        if lin_for_metrics is not None:
-            metrics['Linear'] = self.compute_metrics(lin_for_metrics, hr_for_metrics)
-        if bic_for_metrics is not None:
-            metrics['Bicubic'] = self.compute_metrics(bic_for_metrics, hr_for_metrics)
+        if sr_hu is not None and hr_hu is not None:
+            ms = compute_all_metrics(sr_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+            metrics['SR'] = (ms['MSE'], ms['RMSE'], ms['MAE'], ms['PSNR'], ms['SSIM'], ms['LPIPS'], ms['PI'])
+        if lin_hu is not None and hr_hu is not None:
+            ml = compute_all_metrics(lin_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+            metrics['Linear'] = (ml['MSE'], ml['RMSE'], ml['MAE'], ml['PSNR'], ml['SSIM'], ml['LPIPS'], ml['PI'])
+        if bic_hu is not None and hr_hu is not None:
+            mb = compute_all_metrics(bic_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+            metrics['Bicubic'] = (mb['MSE'], mb['RMSE'], mb['MAE'], mb['PSNR'], mb['SSIM'], mb['LPIPS'], mb['PI'])
 
         # Clear previous metric texts
         for t in self.metric_texts:
@@ -651,150 +752,60 @@ class ViewerLRSRHR:
             self._is_syncing = False
 
     def apply_new_window(self, preset=None, center=None, width=None):
-        # Reload volumes with new window and rebuild derived volumes
-        if self.dicom_folder is None or self.model is None:
-            print('[Window] Missing dicom_folder or model; cannot rewindow')
-            return
+        # Bestimme WL/WW
         if preset is not None:
             self.preset_name = preset
-            override = None
-        else:
-            override = (center, width)
-        print(f"[Window] Rebuilding with preset={self.preset_name} override={override}")
-        new_hr = load_ct_volume(self.dicom_folder, preset=self.preset_name, override_window=override)
-        new_hr = center_crop_to_multiple(new_hr, self.scale)
-        new_lr = build_lr_volume_from_hr(new_hr, scale=self.scale)
-        # model inference per slice
-        # batched model inference for speed
-        new_sr = build_sr_volume_from_lr(new_lr, self.model, batch_size=8)
-        # linear/bicubic upscales for comparison
-        new_lin = F.interpolate(new_lr, scale_factor=(self.scale, self.scale), mode='bilinear', align_corners=False)
-        new_bic = F.interpolate(new_lr, scale_factor=(self.scale, self.scale), mode='bicubic', align_corners=False)
-        # swap and reset ROI
-        self.hr, self.lr, self.sr, self.lin, self.bic = new_hr, new_lr, new_sr, new_lin, new_bic
-        self.roi = None
-        self.hide_roi_overlay()
-        # keep index within bounds
-        D = self.hr.shape[0]
-        self.index = int(np.clip(self.index, 0, D-1))
-        print(f"[Window] Reset index to {self.index} (0 = last loaded slice, {D-1} = first loaded slice)")
-        # refresh WL/WW textbox to reflect current settings if coming from preset
-        if preset is not None:
-            wl = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['center']
-            ww = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])['width']
+            cfg = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])
+            wl = float(cfg['center'])
+            ww = float(cfg['width'])
+            # Textboxen aktualisieren
             try:
                 self.txt_wl.set_val(str(wl))
                 self.txt_ww.set_val(str(ww))
             except Exception:
                 pass
+        else:
+            wl = float(center)
+            ww = float(width)
+
+        # Refenstern der Anzeigevolumes aus den bereits gespeicherten HU-Volumes
+        try:
+            if self.hr_hu is not None:
+                self.hr = hu_to_m11_window(self.hr_hu, wl, ww)
+            if self.sr_hu is not None:
+                self.sr = hu_to_m11_window(self.sr_hu, wl, ww)
+            if self.lin_hu is not None:
+                self.lin = hu_to_m11_window(self.lin_hu, wl, ww)
+            if self.bic_hu is not None:
+                self.bic = hu_to_m11_window(self.bic_hu, wl, ww)
+            if self.lr_hu is not None:                     # <-- vereinfacht
+                self.lr = hu_to_m11_window(self.lr_hu, wl, ww)
+        except ValueError as e:
+            print(f"[Apply WW] Invalid WL/WW input: {e}")
+            return
+
+        # ROI & Index bleiben erhalten; einfach neu zeichnen
         self.update()
 
+
+
     def compute_metrics(self, sr_plane_t, hr_plane_t):
-        # Inputs are torch tensors in [-1,1]
-        sr_np = sr_plane_t.detach().cpu().numpy()
-        hr_np = hr_plane_t.detach().cpu().numpy()
-        sr_np = ((sr_np + 1.0) / 2.0).clip(0.0, 1.0)
-        hr_np = ((hr_np + 1.0) / 2.0).clip(0.0, 1.0)
-        diff = (hr_np.astype(np.float64) - sr_np.astype(np.float64))
-        mse_val = float(np.mean(diff * diff))
-        rmse_val = float(math.sqrt(mse_val))
-        mae_val = float(np.mean(np.abs(diff)))  # MAE hinzugefügt
-        if mse_val <= 0.0:
-            psnr_val = float('inf')
-        else:
-            psnr_val = float(10.0 * math.log10(1.0 / mse_val))
-        try:
-            ssim_val = float(ssim(hr_np, sr_np, data_range=1.0))
-        except Exception:
-            ssim_val = float('nan')
-        # LPIPS
-        try:
-            # Prefer pyiqa LPIPS if available
-            lpips_val = float('nan')
-            try:
-                import pyiqa as _pyiqa
-                if not hasattr(self, '_pyiqa_lpips'):
-                    self._pyiqa_lpips = _pyiqa.create_metric('lpips')
-                    self._pyiqa_lpips.eval()
-                x = torch.tensor(sr_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                x3 = x.repeat(1,3,1,1)
-                y = torch.tensor(hr_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-                y3 = y.repeat(1,3,1,1)
-                with torch.no_grad():
-                    lpips_val = float(self._pyiqa_lpips(x3, y3).item())
-            except Exception:
-                import lpips as _lp
-                lpips_model = getattr(self, '_lpips_model', None)
-                if lpips_model is None:
-                    lpips_model = _lp.LPIPS(net='alex')
-                    lpips_model.eval()
-                    self._lpips_model = lpips_model
-                def to3_m11(x01):
-                    x = torch.tensor(x01*2-1.0, dtype=torch.float32).unsqueeze(0)
-                    return x.repeat(1,3,1,1)
-                lpips_val = float(lpips_model(to3_m11(sr_np), to3_m11(hr_np)).item())
-        except Exception:
-            lpips_val = float('nan')
-        # PI
-        pi_val = float('nan')
-        dbg_ma = float('nan')
-        dbg_niqe = float('nan')
-        try:
-            import pyiqa as _pyiqa
-            if not hasattr(self, '_piqa_niqe'):
-                self._piqa_niqe = _pyiqa.create_metric('niqe')
-                try:
-                    self._piqa_niqe.to('cpu')
-                except Exception:
-                    pass
-            # Initialize Ma metric once (nrqm in pyiqa)
-            if not hasattr(self, '_ma_init_tried'):
-                self._ma_init_tried = True
-                self._ma_available = True
-                try:
-                    self._piqa_ma = _pyiqa.create_metric('nrqm')
-                    try:
-                        self._piqa_ma.to('cpu')
-                    except Exception:
-                        pass
-                except Exception as e:
-                    self._ma_available = False
-                    print(f"[Ma-Setup] pyiqa 'nrqm' not available in this environment -> {e}")
-                    print("[Ma-Setup] To enable PI, ensure pyiqa provides 'nrqm' metric and weights.")
-            x = torch.tensor(sr_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-            # Geräteausrichtung
-            try:
-                dev = next(self._piqa_niqe.parameters()).device
-            except Exception:
-                dev = torch.device('cpu')
-            # NIQE auf nativer Graustufen-Auflösung
-            x_niqe = x.to(dev)
-            # Ma erfordert 3 Kanäle und konstante Eingangsgröße
-            x3 = x.repeat(1,3,1,1)
-            x3r = F.interpolate(x3, size=(224, 224), mode='bilinear', align_corners=False).to(dev)
-            print(f"[Ma-Debug-Input] device={dev} shape={tuple(x3r.shape)} minmax=({float(x3r.min()):.4f},{float(x3r.max()):.4f}) mean={float(x3r.mean()):.4f}")
-            with torch.no_grad():
-                dbg_niqe = float(self._piqa_niqe(x_niqe).item())
-                if getattr(self, '_ma_available', False):
-                    dbg_ma = float(self._piqa_ma(x3r).item())
-                else:
-                    dbg_ma = float('nan')
-            pi_val = float(0.5 * ((10.0 - dbg_ma) + dbg_niqe))
-        except Exception as e:
-            import traceback
-            print(f"[Ma-Debug-Error] {e}")
-            traceback.print_exc()
-            try:
-                from skimage.metrics import niqe as _sk_niqe
-                dbg_niqe = float(_sk_niqe(sr_np.astype(np.float64)))
-                pi_val = dbg_niqe
-            except Exception:
-                pass
-        print(f"[PI-Debug] NIQE={dbg_niqe:.4f} MA={dbg_ma:.4f} -> PI={pi_val:.4f}")
-        return mse_val, rmse_val, mae_val, psnr_val, ssim_val, lpips_val, pi_val
+        # Deprecated: not used; kept for compatibility
+        m = compute_all_metrics(sr_plane_t, hr_plane_t, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+        return (m['MSE'], m['RMSE'], m['MAE'], m['PSNR'], m['SSIM'], m['LPIPS'], m['PI'])
 
 
 def main():
+    import argparse
+    import torch
+    import torch.nn.functional as F
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from rrdb_ct_model import RRDBNet_CT
+    from window_presets import WINDOW_PRESETS
+
+    # ---------- CLI ----------
     parser = argparse.ArgumentParser(description='Visualize LR vs SR vs HR CT slices with mouse-wheel scrolling')
     parser.add_argument('--dicom_folder', type=str, required=True, help='Root folder containing DICOM series')
     parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset')
@@ -811,7 +822,8 @@ def main():
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() and args.device=='cuda' else 'cpu')
+    # ---------- Modell ----------
+    device = torch.device(args.device if torch.cuda.is_available() and args.device == 'cuda' else 'cpu')
     model = RRDBNet_CT(scale=args.scale).to(device)
     state = torch.load(args.model_path, map_location=device)
     if isinstance(state, dict) and 'model' in state and all(k in state for k in ['epoch', 'model']):
@@ -820,13 +832,30 @@ def main():
     model.load_state_dict(state)
     model.eval()
 
-    hr_vol = load_ct_volume(args.dicom_folder, preset=args.preset)
-    # read DICOM metadata for pixel spacing, thickness, patient id
+
+
+
+    # ---------- Daten laden (HU + Meta) ----------
+    hr_hu_vol = load_ct_volume_hu(args.dicom_folder)  # HU via pydicom.apply_modality_lut
     (row_mm, col_mm), slice_thickness, patient_id = read_series_metadata(args.dicom_folder)
-    hr_vol = center_crop_to_multiple(hr_vol, args.scale)
+
+    # Center-Crop HU auf Scale-Multiples (vor jeder Normalisierung!)
+    D, C, H, W = hr_hu_vol.shape
+    target_H = (H // args.scale) * args.scale
+    target_W = (W // args.scale) * args.scale
+    if target_H > 0 and target_W > 0 and (target_H != H or target_W != W):
+        y0 = (H - target_H) // 2
+        x0 = (W - target_W) // 2
+        hr_hu_vol = hr_hu_vol[:, :, y0:y0 + target_H, x0:x0 + target_W]
+        print(f"[Vis] Center-cropped HR from ({H},{W}) -> ({target_H},{target_W}) to match scale={args.scale}")
+
+    # ---------- Global normalisieren (für Degradation/Modell) ----------
+    lo, hi = -1000.0, 2000.0
+    hr_norm_vol = hu_to_m11_global(hr_hu_vol, lo, hi)  # [-1,1]
+
     print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
     lr_vol = build_lr_volume_from_hr(
-        hr_vol, scale=args.scale,
+        hr_norm_vol, scale=args.scale,
         degradation=args.degradation,
         blur_sigma_range=args.blur_sigma_range,
         blur_kernel=args.blur_kernel,
@@ -834,17 +863,33 @@ def main():
         dose_factor_range=args.dose_factor_range,
         antialias_clean=args.antialias_clean
     )
-    sr_vol = build_sr_volume_from_lr(lr_vol, model, batch_size=args.sr_batch)
-    # Also build linear and bicubic upscales of LR to HR size for side-by-side comparison
-    # Treat D as batch, use bilinear/bicubic per slice
-    lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
-    bic_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bicubic', align_corners=False)
 
+    # ---------- SR (Modell) + Referenz-Interpolationen auf [-1,1] ----------
+    sr_vol  = build_sr_volume_from_lr(lr_vol, model, batch_size=args.sr_batch)  # [-1,1]
+    lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
+    bic_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bicubic',  align_corners=False)
+
+    # ---------- Für Metriken: zurück nach HU (global) ----------
+    sr_hu_vol  = m11_to_hu_global(sr_vol,  lo, hi)
+    lin_hu_vol = m11_to_hu_global(lin_vol, lo, hi)
+    bic_hu_vol = m11_to_hu_global(bic_vol, lo, hi)
+    lr_hu_vol  = m11_to_hu_global(lr_vol,  lo, hi)  # optional für Anzeige
+
+    # ---------- Für Anzeige: HU fenstern (WL/WW) ----------
+    preset_cfg = WINDOW_PRESETS.get(args.preset, WINDOW_PRESETS['default'])
+    wl = float(preset_cfg['center']); ww = float(preset_cfg['width'])
+    hr_disp  = hu_to_m11_window(hr_hu_vol,  wl, ww)
+    lr_disp  = hu_to_m11_window(lr_hu_vol,  wl, ww)
+    sr_disp  = hu_to_m11_window(sr_hu_vol,  wl, ww)
+    lin_disp = hu_to_m11_window(lin_hu_vol, wl, ww)
+    bic_disp = hu_to_m11_window(bic_hu_vol, wl, ww)
+
+    # ---------- Viewer starten (Anzeige-Volumes + HU-Volumes für Metriken) ----------
     viewer = ViewerLRSRHR(
-        lr_vol, sr_vol, hr_vol,
+        lr_disp, sr_disp, hr_disp,
         scale=args.scale,
-        lin_volume=lin_vol,
-        bic_volume=bic_vol,
+        lin_volume=lin_disp,
+        bic_volume=bic_disp,
         dicom_folder=args.dicom_folder,
         preset_name=args.preset,
         model=model,
@@ -852,11 +897,18 @@ def main():
         pixel_spacing_mm=(row_mm, col_mm) if (row_mm is not None and col_mm is not None) else None,
         slice_thickness_mm=slice_thickness,
         patient_id=patient_id,
+        hr_hu_volume=hr_hu_vol,
+        sr_hu_volume=sr_hu_vol,
+        lin_hu_volume=lin_hu_vol,
+        bic_hu_volume=bic_hu_vol,
+        lr_hu_volume=lr_hu_vol,
     )
+
     print('Navigation: Mouse wheel or arrow keys to navigate slices')
     print('Keyboard shortcuts: Home (first loaded slice), End (last loaded slice), Arrow keys (previous/next)')
     print('Note: Slices are now reverse-indexed (0 = last loaded slice, highest index = first loaded slice, like in Slicer 3D)')
     plt.show()
+
 
 
 if __name__ == '__main__':
