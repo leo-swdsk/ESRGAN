@@ -510,39 +510,39 @@ class ViewerLRSRHR:
         bic_hu = crop_roi_hu(self.bic_hu) if self.bic_hu is not None else None
         lr_hu = crop_roi_hu(self.lr_hu) if self.lr_hu is not None else None
 
-        # Debug domain logs
-        def _dbg(name, x):
-            if x is None:
-                return
-            print(f"[METDBG] {name}: shape={tuple(x.shape)} min={float(x.min()):.3f} max={float(x.max()):.3f} mean={float(x.mean()):.3f}")
-        _dbg("HR(HU)", hr_hu)
-        _dbg("SR(HU)", sr_hu)
-        _dbg("LIN(HU)", lin_hu)
-        _dbg("BIC(HU)", bic_hu)
-        _dbg("LR(HU)", lr_hu)
+        # Debug domain logs (reduced):
+        # def _dbg(name, x):
+        #     if x is None:
+        #         return
+        #     print(f"[METDBG] {name}: shape={tuple(x.shape)} min={float(x.min()):.3f} max={float(x.max()):.3f} mean={float(x.mean()):.3f}")
+        # _dbg("HR(HU)", hr_hu)
+        # _dbg("SR(HU)", sr_hu)
+        # _dbg("LIN(HU)", lin_hu)
+        # _dbg("BIC(HU)", bic_hu)
+        # _dbg("LR(HU)", lr_hu)
 
         if hr_hu is not None and sr_hu is not None:
             d_sr_hr = torch.mean(torch.abs(sr_hu - hr_hu)).item()
-            print(f"[METDBG] mean|SR-HR|={d_sr_hr:.6g}")
+            # print(f"[METDBG] mean|SR-HR|={d_sr_hr:.6g}")
             assert d_sr_hr > 1e-6, "SR≅HR → falsches Tensor beim Metrik-Call"
         if hr_hu is not None and bic_hu is not None:
             d_bic_hr = torch.mean(torch.abs(bic_hu - hr_hu)).item()
-            print(f"[METDBG] mean|BIC-HR|={d_bic_hr:.6g}")
+            # print(f"[METDBG] mean|BIC-HR|={d_bic_hr:.6g}")
             assert d_bic_hr > 1e-6, "Bicubic≅HR → falsches Tensor beim Metrik-Call"
         if hr_hu is not None and lin_hu is not None:
             d_lin_hr = torch.mean(torch.abs(lin_hu - hr_hu)).item()
-            print(f"[METDBG] mean|LIN-HR|={d_lin_hr:.6g}")
+            # print(f"[METDBG] mean|LIN-HR|={d_lin_hr:.6g}")
             assert d_lin_hr > 1e-4, "Linear≅HR → falsches Tensor beim Metrik-Call"
 
         metrics = {}
         if sr_hu is not None and hr_hu is not None:
-            ms = compute_all_metrics(sr_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+            ms = compute_all_metrics(sr_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cuda', return_components=True)
             metrics['SR'] = (ms['MSE'], ms['RMSE'], ms['MAE'], ms['PSNR'], ms['SSIM'], ms['LPIPS'], ms['PI'])
         if lin_hu is not None and hr_hu is not None:
-            ml = compute_all_metrics(lin_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+            ml = compute_all_metrics(lin_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cuda', return_components=True)
             metrics['Linear'] = (ml['MSE'], ml['RMSE'], ml['MAE'], ml['PSNR'], ml['SSIM'], ml['LPIPS'], ml['PI'])
         if bic_hu is not None and hr_hu is not None:
-            mb = compute_all_metrics(bic_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cpu', return_components=True)
+            mb = compute_all_metrics(bic_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cuda', return_components=True)
             metrics['Bicubic'] = (mb['MSE'], mb['RMSE'], mb['MAE'], mb['PSNR'], mb['SSIM'], mb['LPIPS'], mb['PI'])
 
         # Clear previous metric texts
@@ -783,6 +783,18 @@ class ViewerLRSRHR:
         except ValueError as e:
             print(f"[Apply WW] Invalid WL/WW input: {e}")
             return
+
+        # Konsolen-Log der WL/WW-Effekte (neue Min/Max/Mittelwerte im aktuellen Slice)
+        try:
+            D = self.hr_hu.shape[0]
+            idx = int(np.clip(self.index, 0, D-1))
+            def stats(x):
+                return float(x.min()), float(x.max()), float(x.mean())
+            hr_min, hr_max, hr_mean = stats(self.hr_hu[idx, 0])
+            sr_min, sr_max, sr_mean = stats(self.sr_hu[idx, 0]) if self.sr_hu is not None else (float('nan'),)*3
+            print(f"[WL/WW] preset={self.preset_name} WL={wl:.1f} WW={ww:.1f} | HR(HU) min/max/mean={hr_min:.1f}/{hr_max:.1f}/{hr_mean:.1f} | SR(HU) min/max/mean={sr_min:.1f}/{sr_max:.1f}/{sr_mean:.1f}")
+        except Exception:
+            pass
 
         # ROI & Index bleiben erhalten; einfach neu zeichnen
         self.update()

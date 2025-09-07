@@ -257,7 +257,7 @@ def compute_pi(sr01_gray: torch.Tensor, *, device: str = 'cpu') -> Tuple[float, 
     return pi_val, ma_val, niqe_val
 
 
-def compute_all_metrics(sr_hu: torch.Tensor, hr_hu: torch.Tensor, *, mode: str = 'global', hu_clip: Tuple[float, float] = (-1000.0, 2000.0), wl: Optional[float] = None, ww: Optional[float] = None, lpips_backbone: str = 'alex', device: str = 'cpu', return_components: bool = True) -> Dict[str, float]:
+def compute_all_metrics(sr_hu: torch.Tensor, hr_hu: torch.Tensor, *, mode: str = 'global', hu_clip: Tuple[float, float] = (-1000.0, 2000.0), wl: Optional[float] = None, ww: Optional[float] = None, lpips_backbone: str = 'alex', device: str = 'cuda', return_components: bool = True) -> Dict[str, float]:
     # Inputs ideally HU. Guard against normalized inputs and handle gracefully.
     sr_hu = sr_hu.to(torch.float32)
     hr_hu = hr_hu.to(torch.float32)
