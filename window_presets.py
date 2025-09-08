@@ -8,5 +8,7 @@ WINDOW_PRESETS = {
     "brain": {"center": 40, "width": 80},
     "liver": {"center": 60, "width": 150},
     "abdomen": {"center": 60, "width": 400},
+    # Global HU-Clip preset: [-1000, 2000] ⇒ center=500, width=3000
+    "global": {"center": 500, "width": 3000},
     "default": {"center": 40, "width": 400},  # fallback
 }

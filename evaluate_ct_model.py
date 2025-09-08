@@ -13,6 +13,14 @@ from ct_dataset_loader import CT_Dataset_SR
 from ct_sr_evaluation import compare_methods
 
 
+def _default_blur_sigma_range_for_scale(scale: int):
+    if int(scale) == 2:
+        return (0.8 - 0.1, 0.8 + 0.1)
+    elif int(scale) == 4:
+        return (1.2 - 0.15, 1.2 + 0.15)
+    else:
+        return (0.8 - 0.1, 0.8 + 0.1)
+
 def get_patient_dirs(root_folder):
     dirs = [os.path.join(root_folder, d) for d in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, d))]
     return sorted(dirs)
@@ -42,7 +50,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                    normalization='global', hu_clip=(-1000, 2000), preset='soft_tissue', window_center=40, window_width=400,
                    max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
                    degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True,
+                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
                    degradation_sampling='volume', deg_seed=42):
     ensure_dir(output_dir)
 
@@ -148,6 +156,20 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 degradation_sampling=degradation_sampling,
                 deg_seed=int(deg_seed)
             )
+            # Record effective degradation configuration (ranges and sampled values if available)
+            eff_blur_range = tuple(blur_sigma_range) if blur_sigma_range is not None else _default_blur_sigma_range_for_scale(scale)
+            eval_config["blur_sigma_range_effective"] = [float(eff_blur_range[0]), float(eff_blur_range[1])]
+            eval_config["blur_kernel_effective"] = blur_kernel
+            eval_config["noise_sigma_range_norm_effective"] = [float(noise_sigma_range_norm[0]), float(noise_sigma_range_norm[1])]
+            eval_config["dose_factor_range_effective"] = [float(dose_factor_range[0]), float(dose_factor_range[1])]
+            if degradation_sampling == 'volume':
+                try:
+                    if hasattr(ds, 'deg_params') and ds.deg_params:
+                        eval_config["degradation_sampled"] = ds.deg_params
+                        if eval_config.get("blur_kernel_effective") is None:
+                            eval_config["blur_kernel_effective"] = ds.deg_params.get("kernel")
+                except Exception:
+                    pass
             num_slices = len(ds)
             limit_slices = min(num_slices, max_slices_per_patient) if max_slices_per_patient else num_slices
 

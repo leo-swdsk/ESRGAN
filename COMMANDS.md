@@ -185,3 +185,33 @@ Standard: `--degradation blurnoise`. Ziel ist die realistischere Simulation eine
     ```bash
     python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/15041pp" --model_path rrdb_x2_blurnoise_best.pth --device cuda --preset soft_tissue --degradation blurnoise --dose_factor_range 0.25 0.5
     ```
+
+### Degradations-Sampling und Seed (per-volume / per-slice / deterministisch pro Slice)
+
+- Neue CLI-Optionen (Evaluation/Viewer):
+  - `--degradation_sampling {volume,slice,det-slice}` (Default: `volume`)
+    - `volume`: Ein Satz Blur/Noise-Parameter für das gesamte Volumen (alle Slices gleich)
+    - `slice`: Pro Slice neue Zufallsparameter
+    - `det-slice`: Deterministisch je Slice basierend auf `deg_seed + slice_index`
+  - `--deg_seed INT` (Default: `42`) – Seed für per-volume bzw. det-slice
+
+- Empfohlene Nutzung zur Reproduzierbarkeit (immer mit `finetune_outputs\best.pth`):
+
+```bash
+# Evaluation – per-volume Sampling, reproduzierbar
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --normalization global --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling volume --deg_seed 42
+
+# Evaluation – deterministisch pro Slice (det-slice)
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --normalization global --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling det-slice --deg_seed 42
+
+# Evaluation – Sampling-Effekte ausschalten
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --normalization global --hu_clip -1000 2000 --degradation clean
+
+# Visualisierung – per-volume Sampling, reproduzierbar
+python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/14797pp" --model_path finetune_outputs\best.pth --device cuda --preset soft_tissue --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling volume --deg_seed 42
+
+# Visualisierung – deterministisch pro Slice (optional)
+python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/14797pp" --model_path finetune_outputs\best.pth --device cuda --preset soft_tissue --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling det-slice --deg_seed 42
+```
+
+- Hinweis: Die JSON-Summary aus `evaluate_ct_model.py` enthält nun zusätzlich `degradation_sampling` und `deg_seed`.

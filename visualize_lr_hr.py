@@ -32,7 +32,7 @@ def _kernel_size_from_sigma(sigma: float) -> int:
 
 
 def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 'blurnoise', blur_sigma_range=None,
-                     blur_kernel: int = None, noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0),
+                     blur_kernel: int = None, noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5),
                      antialias_clean: bool = True) -> torch.Tensor:
     # hr_volume: [D,1,H,W]
     device = hr_volume.device

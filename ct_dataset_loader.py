@@ -202,15 +202,20 @@ class CT_Dataset_SR(Dataset):
                 noise_sigma = float(rng.uniform(n_lo, n_hi))
                 d_lo, d_hi = self.dose_factor_range
                 dose = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
+                noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
             else:
                 noise_sigma = 0.0
                 dose = 1.0
+                noise_eff = 0.0
             self._deg_params = {
-                'blur_sigma': blur_sigma,
-                'blur_kernel_k': blur_k,
-                'noise_sigma': noise_sigma,
-                'dose': dose,
+                'sigma': float(blur_sigma),
+                'kernel': int(blur_k),
+                'noise_sigma': float(noise_sigma),
+                'dose': float(dose),
+                'noise_eff': float(noise_eff),
             }
+            # public alias for evaluator JSON logging
+            self.deg_params = dict(self._deg_params)
         if self.normalization == 'global':
             norm_desc = f"global_HU_clip={self.hu_clip}"
         else:
@@ -253,8 +258,8 @@ class CT_Dataset_SR(Dataset):
         dose_used = None
         if self.degradation in ('blur', 'blurnoise'):
             if self.degradation_sampling == 'volume' and self._deg_params is not None:
-                blur_sigma_used = float(self._deg_params['blur_sigma'])
-                k = int(self._deg_params['blur_kernel_k'])
+                blur_sigma_used = float(self._deg_params.get('sigma'))
+                k = int(self._deg_params.get('kernel'))
             elif self.degradation_sampling == 'det-slice':
                 rng = np.random.default_rng(self.deg_seed + int(idx))
                 sig_lo, sig_hi = self.blur_sigma_range
@@ -278,8 +283,8 @@ class CT_Dataset_SR(Dataset):
         # optional noise on LR
         if self.degradation == 'blurnoise':
             if self.degradation_sampling == 'volume' and self._deg_params is not None:
-                noise_sigma_used = float(self._deg_params['noise_sigma'])
-                dose_used = float(self._deg_params['dose'])
+                noise_sigma_used = float(self._deg_params.get('noise_sigma'))
+                dose_used = float(self._deg_params.get('dose'))
             elif self.degradation_sampling == 'det-slice':
                 rng = np.random.default_rng(self.deg_seed + int(idx))
                 n_lo, n_hi = self.noise_sigma_range_norm

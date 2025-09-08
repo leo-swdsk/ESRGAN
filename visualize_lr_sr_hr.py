@@ -194,10 +194,11 @@ def _kernel_size_from_sigma(sigma: float) -> int:
 
 
 def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 'blurnoise', blur_sigma_range=None,
-                     blur_kernel: int = None, noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0),
-                     antialias_clean: bool = True) -> torch.Tensor:
+                     blur_kernel: int = None, noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5),
+                     antialias_clean: bool = True) -> tuple:
     device = hr_volume.device
     dtype = hr_volume.dtype
+    used = {'blur_sigma': None, 'blur_kernel_k': None, 'noise_sigma': None, 'dose': None}
     if degradation in ('blur', 'blurnoise'):
         if blur_sigma_range is None:
             base_sigma = 0.8 if scale == 2 else (1.2 if scale == 4 else 0.8)
@@ -208,6 +209,8 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
         sigma = float(np.random.uniform(sig_lo, sig_hi))
         k = blur_kernel if blur_kernel is not None else _kernel_size_from_sigma(sigma)
         kernel = _gaussian_kernel_2d(max(1e-6, sigma), k, device, dtype)
+        used['blur_sigma'] = float(sigma)
+        used['blur_kernel_k'] = int(k)
         pad = (k // 2, k // 2, k // 2, k // 2)
         x = F.pad(hr_volume, pad, mode='reflect')
         hr_blur = F.conv2d(x, kernel)
@@ -226,11 +229,13 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
         dose = float(np.random.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
         noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
         lr = torch.clamp(lr + torch.randn_like(lr) * noise_eff, -1.0, 1.0)
-    return lr
+        used['noise_sigma'] = float(noise_sigma)
+        used['dose'] = float(dose)
+    return lr, used
 
 
 def build_lr_volume_from_hr(hr_volume, scale=2, *, degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-							 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
+							 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True):
 	return degrade_hr_to_lr(hr_volume, scale,
 		degradation=degradation,
 		blur_sigma_range=blur_sigma_range,
@@ -301,7 +306,9 @@ class ViewerLRSRHR:
                  dicom_folder=None, preset_name="soft_tissue", model=None, device=None,
                  pixel_spacing_mm=None, slice_thickness_mm=None, patient_id='',
                  hr_hu_volume=None, sr_hu_volume=None, lin_hu_volume=None, bic_hu_volume=None,
-                 lr_hu_volume=None, slice_meta=None): 
+                 lr_hu_volume=None, slice_meta=None,
+                 degradation=None, blur_sigma_range=None, blur_kernel=None, noise_sigma_range_norm=None,
+                 dose_factor_range=None, antialias_clean=False, degradation_sampling=None, deg_seed=None): 
         self.lr = lr_volume
         self.sr = sr_volume
         self.hr = hr_volume
@@ -325,6 +332,15 @@ class ViewerLRSRHR:
         self.patient_id = patient_id
         # optional slice meta for identity logging
         self.slice_meta = slice_meta if isinstance(slice_meta, list) else None
+        # degradation config (for info panel)
+        self.degradation = degradation
+        self.blur_sigma_range = blur_sigma_range
+        self.blur_kernel = blur_kernel
+        self.noise_sigma_range_norm = noise_sigma_range_norm
+        self.dose_factor_range = dose_factor_range
+        self.antialias_clean = bool(antialias_clean)
+        self.degradation_sampling = degradation_sampling
+        self.deg_seed = deg_seed
         # track current windowing
         cfg = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])
         self.curr_wl = float(cfg['center'])
@@ -477,6 +493,63 @@ class ViewerLRSRHR:
             info_parts.append(f"Slice Thickness: {self.slice_thickness_mm:.2f} mm")
         if self.ps_row_mm and self.ps_col_mm:
             info_parts.append(f"PixelSpacing: {self.ps_row_mm:.3f} x {self.ps_col_mm:.3f} mm")
+        # Degradation config summary
+        try:
+            if self.degradation:
+                deg_items = [f"Deg: {self.degradation}, "]
+                if self.degradation in ('blur','blurnoise'):
+                    # Always show sigma range (explicit or auto default based on scale)
+                    sigma_auto = False
+                    if self.blur_sigma_range is not None:
+                        try:
+                            s0 = float(self.blur_sigma_range[0]); s1 = float(self.blur_sigma_range[1])
+                        except Exception:
+                            s0 = self.blur_sigma_range[0]; s1 = self.blur_sigma_range[1]
+                    else:
+                        # derive default display range from scale (same heuristic as generation)
+                        base_sigma = 0.8 if int(self.scale) == 2 else (1.2 if int(self.scale) == 4 else 0.8)
+                        jitter = 0.1 if int(self.scale) == 2 else 0.15
+                        s0, s1 = max(1e-6, base_sigma - jitter), base_sigma + jitter
+                        sigma_auto = True
+                    sigma_txt = f"sigma=[{s0:.3f},{s1:.3f}]"
+                    if sigma_auto:
+                        sigma_txt += " (auto)"
+                    deg_items.append(sigma_txt)
+                    # Always show kernel (explicit or auto). If auto, compute representative kernel for mid-sigma.
+                    if self.blur_kernel is not None:
+                        try:
+                            kdisp = int(self.blur_kernel)
+                        except Exception:
+                            kdisp = self.blur_kernel
+                        deg_items.append(f"k={kdisp}")
+                    else:
+                        try:
+                            mid_sigma = 0.5 * (s0 + s1)
+                            k_auto = _kernel_size_from_sigma(mid_sigma)
+                            deg_items.append(f"k={k_auto} (auto)")
+                        except Exception:
+                            deg_items.append("k=auto")
+                if self.degradation == 'blurnoise':
+                    if self.noise_sigma_range_norm is not None:
+                        try:
+                            deg_items.append(f"noise=[{float(self.noise_sigma_range_norm[0]):.4f},{float(self.noise_sigma_range_norm[1]):.4f}]")
+                        except Exception:
+                            pass
+                    if self.dose_factor_range is not None:
+                        try:
+                            deg_items.append(f"dose=[{float(self.dose_factor_range[0]):.2f},{float(self.dose_factor_range[1]):.2f}]")
+                        except Exception:
+                            pass
+                if self.degradation == 'clean' and self.antialias_clean:
+                    deg_items.append("AA")
+                if self.degradation_sampling:
+                    smp = f"smp={self.degradation_sampling}"
+                    if self.deg_seed is not None:
+                        smp += f", seed={self.deg_seed}"
+                    deg_items.append(smp)
+                info_parts.append(', '.join(deg_items))
+        except Exception:
+            pass
         self.text_info.set_text(' | '.join(info_parts))
         self.text.set_text(f'Index: {clamped_idx}/{axis_len-1}')
 
@@ -908,7 +981,7 @@ def main():
         np.random.seed(int(args.deg_seed))
     except Exception:
         pass
-    lr_vol = build_lr_volume_from_hr(
+    lr_vol, used_deg = build_lr_volume_from_hr(
         hr_norm_vol, scale=args.scale,
         degradation=args.degradation,
         blur_sigma_range=args.blur_sigma_range,
@@ -917,6 +990,30 @@ def main():
         dose_factor_range=args.dose_factor_range,
         antialias_clean=args.antialias_clean
     )
+
+    # ---- Log effective degradation parameters (range + drawn values), matching evaluator style ----
+    try:
+        if args.degradation in ('blur', 'blurnoise'):
+            if args.blur_sigma_range is None:
+                base_sigma = 0.8 if args.scale == 2 else (1.2 if args.scale == 4 else 0.8)
+                jitter = 0.1 if args.scale == 2 else 0.15
+                eff_lo, eff_hi = max(1e-6, base_sigma - jitter), base_sigma + jitter
+                sigma_note = 'auto'
+            else:
+                eff_lo, eff_hi = float(args.blur_sigma_range[0]), float(args.blur_sigma_range[1])
+                sigma_note = 'explicit'
+            k_used = used_deg.get('blur_kernel_k')
+            k_note = 'explicit' if (args.blur_kernel is not None) else 'auto'
+            s_used = used_deg.get('blur_sigma')
+            n_used = used_deg.get('noise_sigma')
+            d_used = used_deg.get('dose')
+            print(f"[Vis-Degrad] sigma_range=[{eff_lo:.4f},{eff_hi:.4f}] ({sigma_note}) | used_sigma={s_used if s_used is not None else 'NA'} | k={k_used if k_used is not None else 'NA'} ({k_note})")
+            if args.degradation == 'blurnoise':
+                print(f"[Vis-Degrad] noise_sigma_range={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range} | used_noise_sigma={n_used if n_used is not None else 'NA'} | used_dose={d_used if d_used is not None else 'NA'}")
+        else:
+            print(f"[Vis-Degrad] clean | antialias={args.antialias_clean}")
+    except Exception:
+        pass
 
     # ---------- SR (Modell) + Referenz-Interpolationen auf [-1,1] ----------
     sr_vol  = build_sr_volume_from_lr(lr_vol, model, batch_size=args.sr_batch)  # [-1,1]
@@ -957,6 +1054,14 @@ def main():
         bic_hu_volume=bic_hu_vol,
         lr_hu_volume=lr_hu_vol,
         slice_meta=slice_meta,
+        degradation=args.degradation,
+        blur_sigma_range=args.blur_sigma_range,
+        blur_kernel=args.blur_kernel,
+        noise_sigma_range_norm=args.noise_sigma_range_norm,
+        dose_factor_range=args.dose_factor_range,
+        antialias_clean=args.antialias_clean,
+        degradation_sampling=args.degradation_sampling,
+        deg_seed=args.deg_seed,
     )
 
     print('Navigation: Mouse wheel or arrow keys to navigate slices')

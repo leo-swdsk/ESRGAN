@@ -208,7 +208,7 @@ def _load_split_from_json(split_json: str) -> Dict[str, list]:
 
 def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, num_workers: int = 4, split_json: str = None,
                       degradation: str = 'blurnoise', blur_sigma_range=None, blur_kernel: int = None,
-                      noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean: bool = True) -> Tuple[DataLoader, DataLoader]:
+                      noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean: bool = True) -> Tuple[DataLoader, DataLoader]:
     if split_json and os.path.isfile(split_json):
         print(f"[Split] Using split mapping from {split_json}")
         splits = _load_split_from_json(split_json)
