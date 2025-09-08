@@ -305,11 +305,15 @@ class ViewerLRSRHR:
         self.ps_col_mm = None if pixel_spacing_mm is None else pixel_spacing_mm[1]
         self.slice_thickness_mm = slice_thickness_mm
         self.patient_id = patient_id
+        # track current windowing
+        cfg = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])
+        self.curr_wl = float(cfg['center'])
+        self.curr_ww = float(cfg['width'])
         D, _, _, _ = self.hr.shape
         self.index = 0  # Start bei Index 0 (erste Schicht)
         print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
         if self.lin is not None:
-            print(f"[Viewer] LIN={tuple(self.lin.shape)}")
+            print(f"[Viewer] BIL={tuple(self.lin.shape)}")
         if self.bic is not None:
             print(f"[Viewer] BIC={tuple(self.bic.shape)}")
 
@@ -317,7 +321,7 @@ class ViewerLRSRHR:
         self.fig, self.axes = plt.subplots(1, 5, figsize=(22, 6))
         self.ax_lr, self.ax_lin, self.ax_bic, self.ax_sr, self.ax_hr = self.axes
         self.ax_lr.set_title('LR')
-        self.ax_lin.set_title('Linear x{}'.format(scale))
+        self.ax_lin.set_title('Bilinear x{}'.format(scale))
         self.ax_bic.set_title('Bicubic x{}'.format(scale))
         self.ax_sr.set_title('SR (model)')
         self.ax_hr.set_title('HR')
@@ -403,7 +407,7 @@ class ViewerLRSRHR:
             lin_plane, _, _ = extract_slice(self.lin, clamped_idx)
         if self.bic is not None:
             bic_plane, _, _ = extract_slice(self.bic, clamped_idx)
-        print(f"[Viewer.update] Slice {clamped_idx}/{axis_len-1} | shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} LIN={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is None else tuple(bic_plane.shape)}")
+        print(f"[Viewer.update] Slice {clamped_idx}/{axis_len-1} | shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} BIL={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is None else tuple(bic_plane.shape)}")
 
         # If ROI is set (in HR coords), synchronize axes limits across views
         if self.roi:
@@ -531,18 +535,18 @@ class ViewerLRSRHR:
             assert d_bic_hr > 1e-6, "Bicubic≅HR → falsches Tensor beim Metrik-Call"
         if hr_hu is not None and lin_hu is not None:
             d_lin_hr = torch.mean(torch.abs(lin_hu - hr_hu)).item()
-            # print(f"[METDBG] mean|LIN-HR|={d_lin_hr:.6g}")
-            assert d_lin_hr > 1e-4, "Linear≅HR → falsches Tensor beim Metrik-Call"
+            # print(f"[METDBG] mean|BIL-HR|={d_lin_hr:.6g}")
+            assert d_lin_hr > 1e-4, "Bilinear≅HR → falsches Tensor beim Metrik-Call"
 
         metrics = {}
         if sr_hu is not None and hr_hu is not None:
-            ms = compute_all_metrics(sr_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cuda', return_components=True)
+            ms = compute_all_metrics(sr_hu, hr_hu, mode='window', wl=self.curr_wl, ww=self.curr_ww, lpips_backbone='alex', device='cuda', return_components=True)
             metrics['SR'] = (ms['MSE'], ms['RMSE'], ms['MAE'], ms['PSNR'], ms['SSIM'], ms['LPIPS'], ms['PI'])
         if lin_hu is not None and hr_hu is not None:
-            ml = compute_all_metrics(lin_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cuda', return_components=True)
-            metrics['Linear'] = (ml['MSE'], ml['RMSE'], ml['MAE'], ml['PSNR'], ml['SSIM'], ml['LPIPS'], ml['PI'])
+            ml = compute_all_metrics(lin_hu, hr_hu, mode='window', wl=self.curr_wl, ww=self.curr_ww, lpips_backbone='alex', device='cuda', return_components=True)
+            metrics['Bilinear'] = (ml['MSE'], ml['RMSE'], ml['MAE'], ml['PSNR'], ml['SSIM'], ml['LPIPS'], ml['PI'])
         if bic_hu is not None and hr_hu is not None:
-            mb = compute_all_metrics(bic_hu, hr_hu, mode='global', hu_clip=(-1000.0, 2000.0), lpips_backbone='alex', device='cuda', return_components=True)
+            mb = compute_all_metrics(bic_hu, hr_hu, mode='window', wl=self.curr_wl, ww=self.curr_ww, lpips_backbone='alex', device='cuda', return_components=True)
             metrics['Bicubic'] = (mb['MSE'], mb['RMSE'], mb['MAE'], mb['PSNR'], mb['SSIM'], mb['LPIPS'], mb['PI'])
 
         # Clear previous metric texts
@@ -592,7 +596,7 @@ class ViewerLRSRHR:
 
         y0_text = 0.93
         dy = 0.047
-        for i, name in enumerate(['SR', 'Linear', 'Bicubic']):
+        for i, name in enumerate(['SR', 'Bilinear', 'Bicubic']):
             if name not in metrics:
                 continue
             mse_val, rmse_val, mae_val, psnr_val, ssim_val, lpips_val, pi_val = metrics[name]
@@ -783,6 +787,9 @@ class ViewerLRSRHR:
         except ValueError as e:
             print(f"[Apply WW] Invalid WL/WW input: {e}")
             return
+
+        # store current windowing for metrics
+        self.curr_wl, self.curr_ww = wl, ww
 
         # Konsolen-Log der WL/WW-Effekte (neue Min/Max/Mittelwerte im aktuellen Slice)
         try:

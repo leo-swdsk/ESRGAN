@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-import cv2
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import mean_squared_error
@@ -30,14 +29,11 @@ except Exception:
     _skimage_niqe = None
 
 def upsample_interpolation(lr_tensor, target_size, method="bilinear"):
-    mode = {
-        "bilinear": cv2.INTER_LINEAR,
-        "bicubic": cv2.INTER_CUBIC
-    }.get(method, cv2.INTER_LINEAR)
-
-    img_np = lr_tensor.squeeze(0).cpu().numpy()  # [H, W]
-    img_up = cv2.resize(img_np, dsize=(target_size[1], target_size[0]), interpolation=mode)
-    return torch.tensor(img_up).unsqueeze(0)
+    # lr_tensor: [1,h,w] in [-1,1]; target_size: (H, W)
+    mode = "bilinear" if method == "bilinear" else "bicubic"
+    x = lr_tensor.unsqueeze(0)  # [1,1,h,w]
+    y = F.interpolate(x, size=target_size, mode=mode, align_corners=False)
+    return y.squeeze(0)
 
 def _ensure_lpips_model(target_device: torch.device):
     """Prefer pyiqa's LPIPS (newer API), fallback to lpips package. Creates per-device instance."""
@@ -237,7 +233,7 @@ def evaluate_metrics(sr_tensor, hr_tensor, normalization, hu_clip, window_center
     sr_hu = _denorm_to_hu(sr_tensor, normalization, hu_clip, window_center, window_width).squeeze(0)
     hr_hu = _denorm_to_hu(hr_tensor, normalization, hu_clip, window_center, window_width).squeeze(0)
     m = compute_all_metrics(sr_hu, hr_hu,
-                            mode='global', hu_clip=(-1000.0, 2000.0),
+                            mode='window', wl=window_center, ww=window_width,
                             lpips_backbone='alex', device=metrics_device,
                             return_components=True)
     return {k: float(m[k]) for k in ['MSE','RMSE','MAE','PSNR','SSIM','LPIPS','MA','NIQE','PI']}
