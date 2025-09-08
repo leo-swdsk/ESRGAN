@@ -243,7 +243,7 @@ def _kernel_size_from_sigma(sigma: float) -> int:
 
 def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 'blurnoise', blur_sigma_range=None,
                      blur_kernel: int = None, noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5),
-                     antialias_clean: bool = True) -> tuple:
+                     antialias_clean: bool = True, rng=None) -> tuple:
     device = hr_volume.device
     dtype = hr_volume.dtype
     used = {'blur_sigma': None, 'blur_kernel_k': None, 'noise_sigma': None, 'dose': None}
@@ -254,7 +254,8 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
             sig_lo, sig_hi = max(1e-6, base_sigma - jitter), base_sigma + jitter
         else:
             sig_lo, sig_hi = float(blur_sigma_range[0]), float(blur_sigma_range[1])
-        sigma = float(np.random.default_rng().uniform(sig_lo, sig_hi))
+        rng = np.random.default_rng() if rng is None else rng
+        sigma = float(rng.uniform(sig_lo, sig_hi))
         k = blur_kernel if blur_kernel is not None else _kernel_size_from_sigma(sigma)
         kernel = _gaussian_kernel_2d(max(1e-6, sigma), k, device, dtype)
         used['blur_sigma'] = float(sigma)
@@ -273,13 +274,12 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
     if degradation == 'blurnoise':
         n_lo, n_hi = float(noise_sigma_range_norm[0]), float(noise_sigma_range_norm[1])
         d_lo, d_hi = float(dose_factor_range[0]), float(dose_factor_range[1])
-        rng = np.random.default_rng()
+        rng = np.random.default_rng() if rng is None else rng
         noise_sigma = float(rng.uniform(n_lo, n_hi))
         dose = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
         noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
-        # Use NumPy RNG for noise generation
-        noise_np = np.random.default_rng().normal(loc=0.0, scale=noise_eff, size=tuple(lr.shape))
-        noise_t = torch.as_tensor(noise_np, device=lr.device, dtype=lr.dtype)
+        # GPU-friendly Gaussian noise
+        noise_t = torch.randn_like(lr, device=lr.device, dtype=lr.dtype) * noise_eff
         lr = torch.clamp(lr + noise_t, -1.0, 1.0)
         used['noise_sigma'] = float(noise_sigma)
         used['dose'] = float(dose)
@@ -287,14 +287,15 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
 
 
 def build_lr_volume_from_hr(hr_volume, scale=2, *, degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-							 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True):
+							 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True, rng=None):
 	return degrade_hr_to_lr(hr_volume, scale,
 		degradation=degradation,
 		blur_sigma_range=blur_sigma_range,
 		blur_kernel=blur_kernel,
 		noise_sigma_range_norm=noise_sigma_range_norm,
 		dose_factor_range=dose_factor_range,
-		antialias_clean=antialias_clean)
+		antialias_clean=antialias_clean,
+		rng=rng)
 
 
 def center_crop_to_multiple(volume: torch.Tensor, scale: int) -> torch.Tensor:
@@ -397,13 +398,15 @@ class ViewerLRSRHR:
         cfg = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])
         self.curr_wl = float(cfg['center'])
         self.curr_ww = float(cfg['width'])
-        D, _, _, _ = self.hr.shape
+        D_hr, _, _, _ = (self.hr_hu.shape if self.hr_hu is not None else self.hr.shape)
         self.index = 0  # Start bei Index 0 (inferior/lowest z)
-        print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
-        if self.lin is not None:
-            print(f"[Viewer] BIL={tuple(self.lin.shape)}")
-        if self.bic is not None:
-            print(f"[Viewer] BIC={tuple(self.bic.shape)}")
+        sr_info = ('lazy' if self.sr is None else str(tuple(self.sr.shape)))
+        hr_info = (str(tuple(self.hr_hu.shape)) if self.hr_hu is not None else str(tuple(self.hr.shape)))
+        print(f"[Viewer] init: D={D_hr} | LR={tuple(self.lr.shape)} SR={sr_info} HR={hr_info}")
+        # simple lazy caches for per-slice SR/Interpolations
+        self._sr_cache = {}
+        self._lin_cache = {}
+        self._bic_cache = {}
 
         # Axes: LR | Linear | Bicubic | SR | HR
         self.fig, self.axes = plt.subplots(1, 5, figsize=(22, 6))
@@ -477,24 +480,44 @@ class ViewerLRSRHR:
         self.update()
 
     def update(self):
-        D_hr, _, _, _ = self.hr.shape
+        D_hr, _, _, _ = (self.hr_hu.shape if self.hr_hu is not None else self.hr.shape)
         D_lr, _, _, _ = self.lr.shape
-        D_sr, _, _, _ = self.sr.shape
-        D_lin = self.lin.shape[0] if self.lin is not None else D_sr
-        D_bic = self.bic.shape[0] if self.bic is not None else D_sr
+        # For lazy SR/lin/bic, use D_hr for bounds
+        D_sr = D_hr
+        D_lin = D_hr
+        D_bic = D_hr
 
         clamped_idx = int(np.clip(self.index, 0, min(D_hr, D_lr, D_sr, D_lin, D_bic) - 1))
         print(f"[Viewer.update] index={clamped_idx} / D={min(D_hr, D_lr, D_sr, D_lin, D_bic)} (0 = inferior/lowest z, {min(D_hr, D_lr, D_sr, D_lin, D_bic)-1} = superior/highest z)")
 
-        hr_plane, axis_len, _ = extract_slice(self.hr, clamped_idx)
+        # Use HU as authoritative HR source for display & metrics
+        hr_plane, axis_len, _ = extract_slice(self.hr_hu if self.hr_hu is not None else self.hr, clamped_idx)
         lr_plane, _, _ = extract_slice(self.lr, clamped_idx)
-        sr_plane, _, _ = extract_slice(self.sr, clamped_idx)
-        lin_plane = None
-        bic_plane = None
-        if self.lin is not None:
-            lin_plane, _, _ = extract_slice(self.lin, clamped_idx)
-        if self.bic is not None:
-            bic_plane, _, _ = extract_slice(self.bic, clamped_idx)
+        # On-demand compute for SR/lin/bic (cache per-slice tensors in [-1,1])
+        def _get_sr_slice(idx):
+            if idx not in self._sr_cache:
+                x = self.lr[idx:idx+1].to(self.device)
+                with torch.no_grad():
+                    if self.device.type == 'cuda':
+                        with torch.amp.autocast('cuda'):
+                            y = self.model(x).detach()
+                    else:
+                        y = self.model(x).detach()
+                self._sr_cache[idx] = y.cpu()[0,0]
+            return self._sr_cache[idx]
+        def _get_lin_slice(idx):
+            if idx not in self._lin_cache:
+                y = F.interpolate(self.lr[idx:idx+1], scale_factor=(self.scale,self.scale), mode='bilinear', align_corners=False)[0,0]
+                self._lin_cache[idx] = y
+            return self._lin_cache[idx]
+        def _get_bic_slice(idx):
+            if idx not in self._bic_cache:
+                y = F.interpolate(self.lr[idx:idx+1], scale_factor=(self.scale,self.scale), mode='bicubic', align_corners=False)[0,0]
+                self._bic_cache[idx] = y
+            return self._bic_cache[idx]
+        sr_plane = _get_sr_slice(clamped_idx)
+        lin_plane = _get_lin_slice(clamped_idx)
+        bic_plane = _get_bic_slice(clamped_idx)
         print(f"[Viewer.update] Slice {clamped_idx}/{axis_len-1} | shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} BIL={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is not None else tuple(bic_plane.shape)}")
         # Slice identity debug (to verify index alignment)
         if self.slice_meta is not None and 0 <= clamped_idx < len(self.slice_meta):
@@ -509,11 +532,17 @@ class ViewerLRSRHR:
             x0, y0, x1, y1 = self.roi
             self.apply_axes_limits(x0, y0, x1, y1)
 
-        img_lr = to_display(lr_plane)
-        img_sr = to_display(sr_plane)
-        img_hr = to_display(hr_plane)
-        img_lin = to_display(lin_plane) if lin_plane is not None else np.zeros_like(img_hr)
-        img_bic = to_display(bic_plane) if bic_plane is not None else np.zeros_like(img_hr)
+        # per-slice windowing from HU for display
+        # LR is in [-1,1] -> back to HU (global), then window
+        lr_hu_slice = m11_to_hu_global(lr_plane.unsqueeze(0), -1000.0, 2000.0)[0]
+        sr_hu_slice = m11_to_hu_global(sr_plane.unsqueeze(0), -1000.0, 2000.0)[0]
+        lin_hu_slice = m11_to_hu_global(lin_plane.unsqueeze(0), -1000.0, 2000.0)[0]
+        bic_hu_slice = m11_to_hu_global(bic_plane.unsqueeze(0), -1000.0, 2000.0)[0]
+        img_lr = to_display(hu_to_m11_window(lr_hu_slice, self.curr_wl, self.curr_ww))
+        img_sr = to_display(hu_to_m11_window(sr_hu_slice, self.curr_wl, self.curr_ww))
+        img_hr = to_display(hu_to_m11_window(hr_plane, self.curr_wl, self.curr_ww))
+        img_lin = to_display(hu_to_m11_window(lin_hu_slice, self.curr_wl, self.curr_ww))
+        img_bic = to_display(hu_to_m11_window(bic_hu_slice, self.curr_wl, self.curr_ww))
         print(f"[Viewer.update] ranges LR=({img_lr.min():.3f},{img_lr.max():.3f}) SR=({img_sr.min():.3f},{img_sr.max():.3f}) HR=({img_hr.min():.3f},{img_hr.max():.3f})")
 
         if self.im_lr is None:
@@ -660,11 +689,18 @@ class ViewerLRSRHR:
                 return t[y0i:y1i, x0i:x1i]
             return t
 
-        hr_hu = crop_roi_hu(self.hr_hu) if self.hr_hu is not None else None
-        sr_hu = crop_roi_hu(self.sr_hu) if self.sr_hu is not None else None
-        lin_hu = crop_roi_hu(self.lin_hu) if self.lin_hu is not None else None
-        bic_hu = crop_roi_hu(self.bic_hu) if self.bic_hu is not None else None
-        lr_hu = crop_roi_hu(self.lr_hu) if self.lr_hu is not None else None
+        # Use HU slices prepared above (per-slice), then apply ROI cropping uniformly
+        def crop_hu2d(x2d):
+            if x2d is None:
+                return None
+            if self.roi and x1i is not None and x1i > x0i and y1i > y0i:
+                return x2d[y0i:y1i, x0i:x1i]
+            return x2d
+        hr_hu = crop_hu2d(hr_plane)
+        sr_hu = crop_hu2d(sr_hu_slice)
+        lin_hu = crop_hu2d(lin_hu_slice)
+        bic_hu = crop_hu2d(bic_hu_slice)
+        lr_hu = crop_hu2d(lr_hu_slice)
 
         # Debug domain logs (reduced):
         # def _dbg(name, x):
@@ -1054,7 +1090,8 @@ def main():
         blur_kernel=args.blur_kernel,
         noise_sigma_range_norm=args.noise_sigma_range_norm,
         dose_factor_range=args.dose_factor_range,
-        antialias_clean=args.antialias_clean
+        antialias_clean=args.antialias_clean,
+        rng=rng_vis
     )
 
     # ---- Log effective degradation parameters (range + drawn values), matching evaluator style ----
@@ -1081,32 +1118,18 @@ def main():
     except Exception:
         pass
 
-    # ---------- SR (Modell) + Referenz-Interpolationen auf [-1,1] ----------
-    sr_vol  = build_sr_volume_from_lr(lr_vol, model, batch_size=args.sr_batch)  # [-1,1]
-    lin_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bilinear', align_corners=False)
-    bic_vol = F.interpolate(lr_vol, scale_factor=(args.scale, args.scale), mode='bicubic',  align_corners=False)
+    # ---------- SR/Interpolationen: Lazy-on-demand in Viewer (keine upfront Berechnung) ----------
 
-    # ---------- Für Metriken: zurück nach HU (global) ----------
-    sr_hu_vol  = m11_to_hu_global(sr_vol,  lo, hi)
-    lin_hu_vol = m11_to_hu_global(lin_vol, lo, hi)
-    bic_hu_vol = m11_to_hu_global(bic_vol, lo, hi)
-    lr_hu_vol  = m11_to_hu_global(lr_vol,  lo, hi)  # optional für Anzeige
+    # ---------- Für Metriken: (Lazy) – Volumenweite Konvertierung entfällt; per Slice in Viewer ----------
 
-    # ---------- Für Anzeige: HU fenstern (WL/WW) ----------
+    # ---------- Viewer starten (Lazy Fensterung & Lazy SR/Interpolationen) ----------
     preset_cfg = WINDOW_PRESETS.get(args.preset, WINDOW_PRESETS['default'])
     wl = float(preset_cfg['center']); ww = float(preset_cfg['width'])
-    hr_disp  = hu_to_m11_window(hr_hu_vol,  wl, ww)
-    lr_disp  = hu_to_m11_window(lr_hu_vol,  wl, ww)
-    sr_disp  = hu_to_m11_window(sr_hu_vol,  wl, ww)
-    lin_disp = hu_to_m11_window(lin_hu_vol, wl, ww)
-    bic_disp = hu_to_m11_window(bic_hu_vol, wl, ww)
-
-    # ---------- Viewer starten (Anzeige-Volumes + HU-Volumes für Metriken) ----------
     viewer = ViewerLRSRHR(
-        lr_disp, sr_disp, hr_disp,
+        lr_vol, None, hr_norm_vol,
         scale=args.scale,
-        lin_volume=lin_disp,
-        bic_volume=bic_disp,
+        lin_volume=None,
+        bic_volume=None,
         dicom_folder=args.dicom_folder,
         preset_name=args.preset,
         model=model,
@@ -1115,10 +1138,10 @@ def main():
         slice_thickness_mm=slice_thickness,
         patient_id=patient_id,
         hr_hu_volume=hr_hu_vol,
-        sr_hu_volume=sr_hu_vol,
-        lin_hu_volume=lin_hu_vol,
-        bic_hu_volume=bic_hu_vol,
-        lr_hu_volume=lr_hu_vol,
+        sr_hu_volume=None,
+        lin_hu_volume=None,
+        bic_hu_volume=None,
+        lr_hu_volume=None,
         slice_meta=slice_meta,
         degradation=args.degradation,
         blur_sigma_range=args.blur_sigma_range,
