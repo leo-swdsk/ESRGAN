@@ -1,7 +1,7 @@
 import os
 import csv
 import json
-import random
+import numpy as np
 import argparse
 import math
 from collections import defaultdict
@@ -30,8 +30,9 @@ def split_patients(root_folder, seed=42):
     patient_dirs = get_patient_dirs(root_folder)
     if len(patient_dirs) == 0:
         raise RuntimeError(f"No patient directories found under {root_folder}")
-    random.seed(seed)
-    random.shuffle(patient_dirs)
+    rng = np.random.default_rng(int(seed))
+    perm = rng.permutation(len(patient_dirs))
+    patient_dirs = [patient_dirs[i] for i in perm]
     n = len(patient_dirs)
     train_cut = int(0.70 * n)
     val_cut = int(0.85 * n)
@@ -129,7 +130,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     rows = []
     patient_to_method_metrics = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
-    rng = random.Random(seed)
+    rng = np.random.default_rng(int(seed))
 
     if metrics_mode == 'global':
         print(f"[Eval] Metrics mode: global | hu_clip={hu_clip}")
@@ -181,7 +182,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 if slice_sampling == 'first':
                     indices = list(range(limit_slices))
                 else:  # 'random'
-                    indices = rng.sample(range(num_slices), k=limit_slices)
+                    indices = list(rng.choice(num_slices, size=limit_slices, replace=False))
                     indices.sort()
 
             for s_idx in indices:

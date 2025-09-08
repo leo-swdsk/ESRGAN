@@ -45,7 +45,7 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
             sig_lo, sig_hi = max(1e-6, base_sigma - jitter), base_sigma + jitter
         else:
             sig_lo, sig_hi = float(blur_sigma_range[0]), float(blur_sigma_range[1])
-        sigma = float(np.random.uniform(sig_lo, sig_hi))
+        sigma = float(np.random.default_rng().uniform(sig_lo, sig_hi))
         k = blur_kernel if blur_kernel is not None else _kernel_size_from_sigma(sigma)
         kernel = _gaussian_kernel_2d(max(1e-6, sigma), k, device, dtype)
         pad = (k // 2, k // 2, k // 2, k // 2)
@@ -64,10 +64,13 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
     if degradation == 'blurnoise':
         n_lo, n_hi = float(noise_sigma_range_norm[0]), float(noise_sigma_range_norm[1])
         d_lo, d_hi = float(dose_factor_range[0]), float(dose_factor_range[1])
-        noise_sigma = float(np.random.uniform(n_lo, n_hi))
-        dose = float(np.random.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
+        rng = np.random.default_rng()
+        noise_sigma = float(rng.uniform(n_lo, n_hi))
+        dose = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
         noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
-        lr = torch.clamp(lr + torch.randn_like(lr) * noise_eff, -1.0, 1.0)
+        noise_np = np.random.default_rng().normal(loc=0.0, scale=noise_eff, size=tuple(lr.shape))
+        noise_t = torch.as_tensor(noise_np, device=lr.device, dtype=lr.dtype)
+        lr = torch.clamp(lr + noise_t, -1.0, 1.0)
     return lr
 
 

@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
 import os
-import random
+import numpy as np
 import argparse
 import json
 import matplotlib.pyplot as plt
@@ -115,7 +115,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
 
 # Startpunkt
 if __name__ == "__main__":
-    random.seed(42)
+    # no global RNG seeding; use per-use np.random.default_rng
 
     parser = argparse.ArgumentParser(description='Train RRDBNet_CT on CT super-resolution with L1 loss (pretraining)')
     default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'preprocessed_data')
@@ -160,7 +160,8 @@ if __name__ == "__main__":
     if len(patient_dirs) == 0:
         raise RuntimeError(f"No patient directories found under {root}")
 
-    random.shuffle(patient_dirs)
+    perm = np.random.default_rng(42).permutation(len(patient_dirs))
+    patient_dirs = [patient_dirs[i] for i in perm]
     n = len(patient_dirs)
     # 70/15/15 patient-wise split using deterministic index cutoffs
     train_cut = int(0.70 * n)

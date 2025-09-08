@@ -4,7 +4,7 @@ import pydicom
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-import random
+import numpy as np
 from typing import Literal
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 #WGanze Slices laden bringt meistens kaum einen Vorteil und füllt den Speicher unnötig, deshalb kleinere zufällige Patches
@@ -22,8 +22,9 @@ def random_aligned_crop(hr_tensor, lr_tensor, hr_patch=128, scale=2):
         return lr_tensor, hr_tensor
 
     # zufällige, scale-ausgerichtete Startpunkte
-    y_hr = random.randint(0, max_y_hr)
-    x_hr = random.randint(0, max_x_hr)
+    rng = np.random.default_rng()
+    y_hr = int(rng.integers(0, max_y_hr + 1))
+    x_hr = int(rng.integers(0, max_x_hr + 1))
     # LR-Koordinaten entsprechend skaliert
     y_lr = y_hr // scale
     x_lr = x_hr // scale
@@ -225,8 +226,9 @@ class CT_Dataset_SR(Dataset):
             if H >= self.hr_patch and W >= self.hr_patch:
                 max_y = H - self.hr_patch
                 max_x = W - self.hr_patch
-                y0 = random.randint(0, max_y) if max_y > 0 else 0
-                x0 = random.randint(0, max_x) if max_x > 0 else 0
+                rng = np.random.default_rng()
+                y0 = int(rng.integers(0, max_y + 1)) if max_y > 0 else 0
+                x0 = int(rng.integers(0, max_x + 1)) if max_x > 0 else 0
                 hr = hr_full[:, y0:y0+self.hr_patch, x0:x0+self.hr_patch]
             else:
                 hr = hr_full
@@ -255,8 +257,9 @@ class CT_Dataset_SR(Dataset):
                 blur_sigma_used = float(rng.uniform(sig_lo, sig_hi))
                 k = self.blur_kernel if self.blur_kernel is not None else _compute_kernel_size_from_sigma(blur_sigma_used)
             else:  # 'slice'
+                rng = np.random.default_rng()
                 sig_lo, sig_hi = self.blur_sigma_range
-                blur_sigma_used = random.uniform(sig_lo, sig_hi)
+                blur_sigma_used = float(rng.uniform(sig_lo, sig_hi))
                 k = self.blur_kernel if self.blur_kernel is not None else _compute_kernel_size_from_sigma(blur_sigma_used)
             hr_for_lr = gaussian_blur_2d(hr, sigma=blur_sigma_used, kernel_size=k)
         else:
@@ -281,12 +284,16 @@ class CT_Dataset_SR(Dataset):
                 d_lo, d_hi = self.dose_factor_range
                 dose_used = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
             else:  # 'slice'
+                rng = np.random.default_rng()
                 n_lo, n_hi = self.noise_sigma_range_norm
-                noise_sigma_used = random.uniform(n_lo, n_hi)
+                noise_sigma_used = float(rng.uniform(n_lo, n_hi))
                 d_lo, d_hi = self.dose_factor_range
-                dose_used = random.uniform(min(d_lo, d_hi), max(d_lo, d_hi))
+                dose_used = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
             noise_eff = float(noise_sigma_used) / max(1e-6, float(dose_used)) ** 0.5
-            lr = lr + torch.randn_like(lr) * noise_eff
+            # Use numpy RNG for noise, then convert to torch tensor on same device/dtype
+            noise_np = np.random.default_rng().normal(loc=0.0, scale=noise_eff, size=lr.shape,)
+            noise_t = torch.as_tensor(noise_np, device=lr.device, dtype=lr.dtype)
+            lr = lr + noise_t
             lr = torch.clamp(lr, -1.0, 1.0)
 
         # one-time log of actual parameters used
