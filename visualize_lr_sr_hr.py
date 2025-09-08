@@ -32,23 +32,48 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
     else:
         wl, ww = window["center"], window["width"]
 
-    slice_list = []
-    slice_paths = []
-    
-    # Sammle alle DICOM-Dateien und ihre Pfade
+    # 1) Gather candidate CT DICOMs
+    cand_paths = []
     for root, _, files in os.walk(folder_path):
-        for f in sorted(files):
+        for f in files:
             if not f.lower().endswith('.dcm'):
                 continue
             path = os.path.join(root, f)
-            if not is_ct_image_dicom(path):
-                continue
-            slice_paths.append(path)
-    
-    # Sortiere die Pfade, um konsistente Reihenfolge zu gewährleisten
-    slice_paths.sort()
-    
-    # Lade die Slices in der sortierten Reihenfolge
+            if is_ct_image_dicom(path):
+                cand_paths.append(path)
+
+    if len(cand_paths) == 0:
+        raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
+
+    # 2) Sort by geometry (inferior -> superior)
+    def _order_key(path: str):
+        try:
+            ds_hdr = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+            ipp = getattr(ds_hdr, 'ImagePositionPatient', None)
+            iop = getattr(ds_hdr, 'ImageOrientationPatient', None)
+            inst = getattr(ds_hdr, 'InstanceNumber', None)
+            sloc = getattr(ds_hdr, 'SliceLocation', None)
+            if iop is not None and len(iop) >= 6 and ipp is not None and len(ipp) >= 3:
+                r = np.array([float(iop[0]), float(iop[1]), float(iop[2])], dtype=np.float64)
+                c = np.array([float(iop[3]), float(iop[4]), float(iop[5])], dtype=np.float64)
+                n = np.cross(r, c)
+                p = np.array([float(ipp[0]), float(ipp[1]), float(ipp[2])], dtype=np.float64)
+                zproj = float(np.dot(p, n))
+                return (0, zproj, 0 if inst is None else int(inst))
+            if ipp is not None and len(ipp) >= 3:
+                return (1, float(ipp[2]), 0 if inst is None else int(inst))
+            if sloc is not None:
+                return (2, float(sloc), 0 if inst is None else int(inst))
+            if inst is not None:
+                return (3, float(int(inst)), 0)
+        except Exception:
+            pass
+        return (4, 0.0, 0.0)
+
+    slice_paths = sorted(cand_paths, key=_order_key)
+
+    # 3) Load pixels in sorted order
+    slice_list = []
     for path in slice_paths:
         try:
             ds = pydicom.dcmread(path, force=True)
@@ -65,34 +90,59 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
             continue
 
     if len(slice_list) == 0:
-        raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
-    
+        raise RuntimeError(f"No readable CT image slices found under {folder_path}")
+
+    # 4) Enforce consistent H,W and stack
     H, W = slice_list[0].shape[-2:]
     slice_list = [s for s in slice_list if s.shape[-2:] == (H, W)]
-    
-    # Kehre die Schichtreihenfolge um: erste geladene Schicht wird höchster Index
-    slice_list.reverse()
-    
-    # Erstelle das Volumen - erste geladene Schicht wird höchster Index (wie in Slicer 3D)
     vol = torch.stack(slice_list, dim=0)
-    
-    print(f"[CT-Loader] Loaded {vol.shape[0]} slices with dimensions {vol.shape[1:]} (Index 0 = last loaded slice, Index {vol.shape[0]-1} = first loaded slice)")
+
+    print(f"[CT-Loader] Loaded {vol.shape[0]} slices with dimensions {vol.shape[1:]} (Index 0 = inferior/lowest z, Index {vol.shape[0]-1} = superior/highest z)")
     return vol
 
 
 def load_ct_volume_hu(folder_path):
-    slice_list = []
-    slice_paths = []
-    meta_list = []
+    # Gather candidate CT DICOMs
+    cand_paths = []
     for root, _, files in os.walk(folder_path):
-        for f in sorted(files):
+        for f in files:
             if not f.lower().endswith('.dcm'):
                 continue
             path = os.path.join(root, f)
-            if not is_ct_image_dicom(path):
-                continue
-            slice_paths.append(path)
-    slice_paths.sort()
+            if is_ct_image_dicom(path):
+                cand_paths.append(path)
+    if len(cand_paths) == 0:
+        raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
+
+    # Sort by geometry (inferior -> superior)
+    def _order_key(path: str):
+        try:
+            ds_hdr = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+            ipp = getattr(ds_hdr, 'ImagePositionPatient', None)
+            iop = getattr(ds_hdr, 'ImageOrientationPatient', None)
+            inst = getattr(ds_hdr, 'InstanceNumber', None)
+            sloc = getattr(ds_hdr, 'SliceLocation', None)
+            if iop is not None and len(iop) >= 6 and ipp is not None and len(ipp) >= 3:
+                r = np.array([float(iop[0]), float(iop[1]), float(iop[2])], dtype=np.float64)
+                c = np.array([float(iop[3]), float(iop[4]), float(iop[5])], dtype=np.float64)
+                n = np.cross(r, c)
+                p = np.array([float(ipp[0]), float(ipp[1]), float(ipp[2])], dtype=np.float64)
+                zproj = float(np.dot(p, n))
+                return (0, zproj, 0 if inst is None else int(inst))
+            if ipp is not None and len(ipp) >= 3:
+                return (1, float(ipp[2]), 0 if inst is None else int(inst))
+            if sloc is not None:
+                return (2, float(sloc), 0 if inst is None else int(inst))
+            if inst is not None:
+                return (3, float(int(inst)), 0)
+        except Exception:
+            pass
+        return (4, 0.0, 0.0)
+
+    slice_paths = sorted(cand_paths, key=_order_key)
+
+    slice_list = []
+    meta_list = []
     for path in slice_paths:
         try:
             ds = pydicom.dcmread(path, force=True)
@@ -125,8 +175,6 @@ def load_ct_volume_hu(folder_path):
     slice_list, meta_list = zip(*filtered)
     slice_list = list(slice_list)
     meta_list = list(meta_list)
-    slice_list.reverse()
-    meta_list.reverse()
     vol = torch.stack(slice_list, dim=0)
     return vol, meta_list
 
@@ -350,7 +398,7 @@ class ViewerLRSRHR:
         self.curr_wl = float(cfg['center'])
         self.curr_ww = float(cfg['width'])
         D, _, _, _ = self.hr.shape
-        self.index = 0  # Start bei Index 0 (erste Schicht)
+        self.index = 0  # Start bei Index 0 (inferior/lowest z)
         print(f"[Viewer] init: D={D} | LR={tuple(self.lr.shape)} SR={tuple(self.sr.shape)} HR={tuple(self.hr.shape)}")
         if self.lin is not None:
             print(f"[Viewer] BIL={tuple(self.lin.shape)}")
@@ -421,7 +469,7 @@ class ViewerLRSRHR:
             except Exception as e:
                 print(f"[Apply WW] Invalid WL/WW input: {e}")
         self.btn_apply.on_clicked(apply_manual)
-        print('[Hint] Navigation: Mouse wheel or arrow keys; Home/End for first/last loaded slice; Drag on HR to select ROI; press r to reset ROI; change presets or set WL/WW and click Apply')
+        print('[Hint] Navigation: Mouse wheel or arrow keys (Up=superior, Down=inferior, Left=previous, Right=next); Home=inferior, End=superior; Drag on HR to select ROI; press r to reset ROI; change presets or set WL/WW and click Apply')
         # sync to toolbar zoom/pan on all axes
         for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic, self.ax_lr]:
             ax.callbacks.connect('xlim_changed', self.on_axes_limits_change)
@@ -436,7 +484,7 @@ class ViewerLRSRHR:
         D_bic = self.bic.shape[0] if self.bic is not None else D_sr
 
         clamped_idx = int(np.clip(self.index, 0, min(D_hr, D_lr, D_sr, D_lin, D_bic) - 1))
-        print(f"[Viewer.update] index={clamped_idx} / D={min(D_hr, D_lr, D_sr, D_lin, D_bic)} (0 = last loaded slice, {min(D_hr, D_lr, D_sr, D_lin, D_bic)-1} = first loaded slice)")
+        print(f"[Viewer.update] index={clamped_idx} / D={min(D_hr, D_lr, D_sr, D_lin, D_bic)} (0 = inferior/lowest z, {min(D_hr, D_lr, D_sr, D_lin, D_bic)-1} = superior/highest z)")
 
         hr_plane, axis_len, _ = extract_slice(self.hr, clamped_idx)
         lr_plane, _, _ = extract_slice(self.lr, clamped_idx)
@@ -555,7 +603,7 @@ class ViewerLRSRHR:
         except Exception:
             pass
         self.text_info.set_text(' | '.join(info_parts))
-        self.text.set_text(f'Index: {clamped_idx}/{axis_len-1}')
+        self.text.set_text(f'Index: {clamped_idx}/{axis_len-1} (0=inferior, {axis_len-1}=superior)')
 
         # If no ROI is active, ensure axes show full images explicitly
         if not self.roi:
@@ -730,7 +778,7 @@ class ViewerLRSRHR:
         D, _, _, _ = self.hr.shape
         # clamp index strictly within [0, D-1]
         self.index = int(np.clip(self.index + step, 0, D - 1))
-        print(f"[Scroll] Slice {old_index} -> {self.index} (0 = last loaded slice, {D-1} = first loaded slice)")
+        print(f"[Scroll] Slice {old_index} -> {self.index} (0=inferior, {D-1}=superior)")
         self.update()
 
     def on_key(self, event):
@@ -740,27 +788,27 @@ class ViewerLRSRHR:
             self.hide_roi_overlay()
             self.update()
         elif event.key == 'home':
-            # Go to first loaded slice (höchster Index)
-            D, _, _, _ = self.hr.shape
-            self.index = D - 1
-            print(f"[Key] Home -> Slice {D-1} (first loaded slice)")
+            # Go to inferior (lowest z)
+            self.index = 0
+            print(f"[Key] Home -> Slice 0 (inferior)")
             self.update()
         elif event.key == 'end':
-            # Go to last loaded slice (Index 0)
-            self.index = 0
-            print(f"[Key] End -> Slice 0 (last loaded slice)")
+            # Go to superior (highest z)
+            D, _, _, _ = self.hr.shape
+            self.index = D - 1
+            print(f"[Key] End -> Slice {D-1} (superior)")
             self.update()
         elif event.key in ['left', 'up']:
-            # Previous slice (höherer Index)
-            D, _, _, _ = self.hr.shape
-            if self.index < D - 1:
-                self.index = min(self.index + 1, D - 1)
+            # Previous slice: move towards inferior
+            if self.index > 0:
+                self.index = max(self.index - 1, 0)
                 print(f"[Key] Previous -> Slice {self.index}")
                 self.update()
         elif event.key in ['right', 'down']:
-            # Next slice (niedrigerer Index)
-            if self.index > 0:
-                self.index = max(self.index - 1, 0)
+            # Next slice: move towards superior
+            D, _, _, _ = self.hr.shape
+            if self.index < D - 1:
+                self.index = min(self.index + 1, D - 1)
                 print(f"[Key] Next -> Slice {self.index}")
                 self.update()
 
@@ -904,6 +952,22 @@ class ViewerLRSRHR:
             hr_min, hr_max, hr_mean = stats(self.hr_hu[idx, 0])
             sr_min, sr_max, sr_mean = stats(self.sr_hu[idx, 0]) if self.sr_hu is not None else (float('nan'),)*3
             print(f"[WL/WW] preset={self.preset_name} WL={wl:.1f} WW={ww:.1f} | HR(HU) min/max/mean={hr_min:.1f}/{hr_max:.1f}/{hr_mean:.1f} | SR(HU) min/max/mean={sr_min:.1f}/{sr_max:.1f}/{sr_mean:.1f}")
+        except Exception:
+            pass
+
+        # Short debug print of display ranges after applying WL/WW
+        try:
+            D_disp = self.hr.shape[0]
+            idx_disp = int(np.clip(self.index, 0, D_disp-1))
+            def disp_rng(tensor_vol):
+                if tensor_vol is None:
+                    return (float('nan'), float('nan'))
+                img = to_display(tensor_vol[idx_disp, 0])
+                return float(img.min()), float(img.max())
+            lr_min_d, lr_max_d = disp_rng(self.lr)
+            sr_min_d, sr_max_d = disp_rng(self.sr)
+            hr_min_d, hr_max_d = disp_rng(self.hr)
+            print(f"[Window] Applied WL/WW=({wl:.1f},{ww:.1f}); ranges LR=({lr_min_d:.3f},{lr_max_d:.3f}) SR=({sr_min_d:.3f},{sr_max_d:.3f}) HR=({hr_min_d:.3f},{hr_max_d:.3f})")
         except Exception:
             pass
 
@@ -1067,8 +1131,8 @@ def main():
     )
 
     print('Navigation: Mouse wheel or arrow keys to navigate slices')
-    print('Keyboard shortcuts: Home (first loaded slice), End (last loaded slice), Arrow keys (previous/next)')
-    print('Note: Slices are now reverse-indexed (0 = last loaded slice, highest index = first loaded slice, like in Slicer 3D)')
+    print('Keyboard shortcuts: Home (inferior), End (superior), Arrow keys (previous/next)')
+    print('Indexing: 0 = inferior (lowest z), highest index = superior (highest z)')
     plt.show()
 
 
