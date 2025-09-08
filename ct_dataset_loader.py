@@ -5,6 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import random
+from typing import Literal
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 #WGanze Slices laden bringt meistens kaum einen Vorteil und füllt den Speicher unnötig, deshalb kleinere zufällige Patches
 def random_aligned_crop(hr_tensor, lr_tensor, hr_patch=128, scale=2):
@@ -148,8 +149,13 @@ class CT_Dataset_SR(Dataset):
     def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None,
                  do_random_crop=True, hr_patch=128, normalization='global', hu_clip=(-1000, 2000),
                  degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-                 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True):
+                 noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
+                 reverse_order=True,
+                 degradation_sampling: Literal['volume','slice','det-slice'] = 'volume', deg_seed: int = 42):
         self.paths = find_dicom_files_recursively(dicom_folder)
+        if reverse_order:
+            # align ordering with viewer: last loaded slice first (index 0)
+            self.paths = list(reversed(self.paths))
         if max_slices:
             self.paths = self.paths[:max_slices]
         self.wc = window_center
@@ -161,6 +167,8 @@ class CT_Dataset_SR(Dataset):
         self.hu_clip = hu_clip
         # degradation settings
         self.degradation = degradation  # 'clean' | 'blur' | 'blurnoise'
+        self.degradation_sampling = degradation_sampling
+        self.deg_seed = int(deg_seed)
         # default sigma ranges based on scale if not provided
         if blur_sigma_range is None:
             base_sigma = 0.8 if self.scale == 2 else (1.2 if self.scale == 4 else 0.8)
@@ -172,12 +180,44 @@ class CT_Dataset_SR(Dataset):
         self.noise_sigma_range_norm = tuple(noise_sigma_range_norm)
         self.dose_factor_range = tuple(dose_factor_range)
         self.antialias_clean = bool(antialias_clean)
+        # per-volume deterministic degradation params
+        self._deg_params = None
+        self._deg_logged = False
+        if self.degradation_sampling == 'volume' and self.degradation in ('blur','blurnoise'):
+            rng = np.random.default_rng(self.deg_seed)
+            # blur sigma
+            sig_lo, sig_hi = self.blur_sigma_range
+            blur_sigma = float(rng.uniform(sig_lo, sig_hi))
+            if self.blur_kernel is not None:
+                blur_k = int(self.blur_kernel)
+                if blur_k % 2 == 0:
+                    blur_k += 1
+            else:
+                # match heuristic _compute_kernel_size_from_sigma
+                k = int(max(3, round(6.0 * float(blur_sigma))))
+                blur_k = k if (k % 2 == 1) else (k + 1)
+            # noise/dose
+            if self.degradation == 'blurnoise':
+                n_lo, n_hi = self.noise_sigma_range_norm
+                noise_sigma = float(rng.uniform(n_lo, n_hi))
+                d_lo, d_hi = self.dose_factor_range
+                dose = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
+            else:
+                noise_sigma = 0.0
+                dose = 1.0
+            self._deg_params = {
+                'blur_sigma': blur_sigma,
+                'blur_kernel_k': blur_k,
+                'noise_sigma': noise_sigma,
+                'dose': dose,
+            }
         if self.normalization == 'global':
             norm_desc = f"global_HU_clip={self.hu_clip}"
         else:
             norm_desc = f"window=({self.wc},{self.ww})"
         print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | norm={norm_desc} | random_crop={self.do_random_crop}")
         print(f"[CT-Loader] Degradation='{self.degradation}' | blur_sigma_range={self.blur_sigma_range} | blur_kernel={self.blur_kernel} | noise_sigma_range_norm={self.noise_sigma_range_norm} | dose_factor_range={self.dose_factor_range}")
+        print(f"[CT-Loader] Degradation sampling mode='{self.degradation_sampling}' | deg_seed={self.deg_seed}")
 
     def __len__(self):
         return len(self.paths)
@@ -207,12 +247,24 @@ class CT_Dataset_SR(Dataset):
                 x0 = (W - target_W) // 2
                 hr = hr[:, y0:y0+target_H, x0:x0+target_W]
 
-        # sample jitter parameters per item
+        # sample jitter parameters per item/volume/deterministic slice
+        blur_sigma_used = None
+        noise_sigma_used = None
+        dose_used = None
         if self.degradation in ('blur', 'blurnoise'):
-            sig_lo, sig_hi = self.blur_sigma_range
-            blur_sigma = random.uniform(sig_lo, sig_hi)
-            k = self.blur_kernel if self.blur_kernel is not None else _compute_kernel_size_from_sigma(blur_sigma)
-            hr_for_lr = gaussian_blur_2d(hr, sigma=blur_sigma, kernel_size=k)
+            if self.degradation_sampling == 'volume' and self._deg_params is not None:
+                blur_sigma_used = float(self._deg_params['blur_sigma'])
+                k = int(self._deg_params['blur_kernel_k'])
+            elif self.degradation_sampling == 'det-slice':
+                rng = np.random.default_rng(self.deg_seed + int(idx))
+                sig_lo, sig_hi = self.blur_sigma_range
+                blur_sigma_used = float(rng.uniform(sig_lo, sig_hi))
+                k = self.blur_kernel if self.blur_kernel is not None else _compute_kernel_size_from_sigma(blur_sigma_used)
+            else:  # 'slice'
+                sig_lo, sig_hi = self.blur_sigma_range
+                blur_sigma_used = random.uniform(sig_lo, sig_hi)
+                k = self.blur_kernel if self.blur_kernel is not None else _compute_kernel_size_from_sigma(blur_sigma_used)
+            hr_for_lr = gaussian_blur_2d(hr, sigma=blur_sigma_used, kernel_size=k)
         else:
             hr_for_lr = hr
 
@@ -225,13 +277,28 @@ class CT_Dataset_SR(Dataset):
 
         # optional noise on LR
         if self.degradation == 'blurnoise':
-            n_lo, n_hi = self.noise_sigma_range_norm
-            noise_sigma = random.uniform(n_lo, n_hi)
-            d_lo, d_hi = self.dose_factor_range
-            dose = random.uniform(min(d_lo, d_hi), max(d_lo, d_hi))
-            noise_eff = noise_sigma / max(1e-6, float(dose)) ** 0.5
+            if self.degradation_sampling == 'volume' and self._deg_params is not None:
+                noise_sigma_used = float(self._deg_params['noise_sigma'])
+                dose_used = float(self._deg_params['dose'])
+            elif self.degradation_sampling == 'det-slice':
+                rng = np.random.default_rng(self.deg_seed + int(idx))
+                n_lo, n_hi = self.noise_sigma_range_norm
+                noise_sigma_used = float(rng.uniform(n_lo, n_hi))
+                d_lo, d_hi = self.dose_factor_range
+                dose_used = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
+            else:  # 'slice'
+                n_lo, n_hi = self.noise_sigma_range_norm
+                noise_sigma_used = random.uniform(n_lo, n_hi)
+                d_lo, d_hi = self.dose_factor_range
+                dose_used = random.uniform(min(d_lo, d_hi), max(d_lo, d_hi))
+            noise_eff = float(noise_sigma_used) / max(1e-6, float(dose_used)) ** 0.5
             lr = lr + torch.randn_like(lr) * noise_eff
             lr = torch.clamp(lr, -1.0, 1.0)
+
+        # one-time log of actual parameters used
+        if not self._deg_logged:
+            print(f"[Deg] mode={self.degradation_sampling} blur_sigma={blur_sigma_used if blur_sigma_used is not None else 'NA'} noise_sigma={noise_sigma_used if noise_sigma_used is not None else 'NA'} dose={dose_used if dose_used is not None else 'NA'}")
+            self._deg_logged = True
 
         return lr, hr
 

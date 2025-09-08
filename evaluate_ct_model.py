@@ -42,7 +42,8 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                    normalization='global', hu_clip=(-1000, 2000), preset='soft_tissue', window_center=40, window_width=400,
                    max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
                    degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True):
+                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(1.0, 1.0), antialias_clean=True,
+                   degradation_sampling='volume', deg_seed=42):
     ensure_dir(output_dir)
 
     # Persist complete evaluation configuration for reproducibility
@@ -68,6 +69,8 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         'noise_sigma_range_norm': noise_sigma_range_norm,
         'dose_factor_range': dose_factor_range,
         'antialias_clean': antialias_clean,
+        'degradation_sampling': degradation_sampling,
+        'deg_seed': deg_seed,
     }
 
     # Prepare model
@@ -121,6 +124,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     else:
         print(f"[Eval] Using normalization='window' | preset={preset} | WL/WW=({window_center},{window_width})")
     print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={blur_sigma_range} | blur_kernel={blur_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
+    print(f"[Eval] Degradation sampling='{degradation_sampling}' | deg_seed={deg_seed}")
     with torch.no_grad():
         for p_idx, patient_dir in enumerate(patient_dirs):
             patient_id = os.path.basename(patient_dir)
@@ -139,7 +143,10 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 blur_kernel=blur_kernel,
                 noise_sigma_range_norm=tuple(noise_sigma_range_norm),
                 dose_factor_range=tuple(dose_factor_range),
-                antialias_clean=antialias_clean
+                antialias_clean=antialias_clean,
+                reverse_order=True,
+                degradation_sampling=degradation_sampling,
+                deg_seed=int(deg_seed)
             )
             num_slices = len(ds)
             limit_slices = min(num_slices, max_slices_per_patient) if max_slices_per_patient else num_slices
@@ -156,6 +163,18 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
             for s_idx in indices:
                 lr, hr = ds[s_idx]
+                # Debug identity print to verify consistent slice matching
+                try:
+                    import pydicom
+                    # read metadata from dataset path since CT_Dataset_SR stores file ordering
+                    # by construction, ds.paths is aligned to ds indices
+                    dicom_path = ds.paths[s_idx]
+                    dsi = pydicom.dcmread(dicom_path, stop_before_pixels=True, force=True)
+                    inst = getattr(dsi, 'InstanceNumber', None)
+                    uid = str(getattr(dsi, 'SOPInstanceUID', ''))
+                    print(f"[Eval SliceMeta] patient={patient_id} idx={s_idx} InstanceNumber={inst} SOPInstanceUID={uid} Path={dicom_path}")
+                except Exception:
+                    pass
                 results = compare_methods(
                     lr, hr, model,
                     normalization=normalization,
@@ -298,6 +317,8 @@ def main():
     parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
     parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
+    parser.add_argument('--degradation_sampling', type=str, default='volume', choices=['volume','slice','det-slice'], help='Degradation sampling mode (volume|slice|det-slice)')
+    parser.add_argument('--deg_seed', type=int, default=42, help='Seed for degradation sampling (volume or det-slice)')
     args = parser.parse_args()
 
     # Echo CLI config
@@ -322,6 +343,8 @@ def main():
     print("[Eval-Args] noise_sigma_range_norm=", args.noise_sigma_range_norm)
     print("[Eval-Args] dose_factor_range=", args.dose_factor_range)
     print("[Eval-Args] antialias_clean=", args.antialias_clean)
+    print("[Eval-Args] degradation_sampling=", args.degradation_sampling)
+    print("[Eval-Args] deg_seed=", args.deg_seed)
 
     evaluate_split(
         root_folder=args.root,
@@ -345,6 +368,8 @@ def main():
         noise_sigma_range_norm=args.noise_sigma_range_norm,
         dose_factor_range=args.dose_factor_range,
         antialias_clean=args.antialias_clean
+        ,degradation_sampling=args.degradation_sampling
+        ,deg_seed=args.deg_seed
     )
 
 

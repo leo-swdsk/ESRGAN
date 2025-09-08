@@ -83,6 +83,7 @@ def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
 def load_ct_volume_hu(folder_path):
     slice_list = []
     slice_paths = []
+    meta_list = []
     for root, _, files in os.walk(folder_path):
         for f in sorted(files):
             if not f.lower().endswith('.dcm'):
@@ -99,18 +100,35 @@ def load_ct_volume_hu(folder_path):
             hu = apply_modality_lut(arr, ds).astype(np.float32)
             if hu.ndim == 2:
                 slice_list.append(torch.tensor(hu).unsqueeze(0))
+                meta_list.append({
+                    'path': path,
+                    'InstanceNumber': getattr(ds, 'InstanceNumber', None),
+                    'SOPInstanceUID': str(getattr(ds, 'SOPInstanceUID', ''))
+                })
             elif hu.ndim == 3:
                 for k in range(hu.shape[0]):
                     slice_list.append(torch.tensor(hu[k]).unsqueeze(0))
+                    meta_list.append({
+                        'path': path,
+                        'subindex': k,
+                        'InstanceNumber': getattr(ds, 'InstanceNumber', None),
+                        'SOPInstanceUID': str(getattr(ds, 'SOPInstanceUID', ''))
+                    })
         except Exception:
             continue
     if len(slice_list) == 0:
         raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
     H, W = slice_list[0].shape[-2:]
-    slice_list = [s for s in slice_list if s.shape[-2:] == (H, W)]
+    filtered = [(s, m) for s, m in zip(slice_list, meta_list) if s.shape[-2:] == (H, W)]
+    if len(filtered) == 0:
+        raise RuntimeError("No slices with consistent dimensions found")
+    slice_list, meta_list = zip(*filtered)
+    slice_list = list(slice_list)
+    meta_list = list(meta_list)
     slice_list.reverse()
+    meta_list.reverse()
     vol = torch.stack(slice_list, dim=0)
-    return vol
+    return vol, meta_list
 
 
 def read_series_metadata(folder_path):
@@ -283,7 +301,7 @@ class ViewerLRSRHR:
                  dicom_folder=None, preset_name="soft_tissue", model=None, device=None,
                  pixel_spacing_mm=None, slice_thickness_mm=None, patient_id='',
                  hr_hu_volume=None, sr_hu_volume=None, lin_hu_volume=None, bic_hu_volume=None,
-                 lr_hu_volume=None): 
+                 lr_hu_volume=None, slice_meta=None): 
         self.lr = lr_volume
         self.sr = sr_volume
         self.hr = hr_volume
@@ -305,6 +323,8 @@ class ViewerLRSRHR:
         self.ps_col_mm = None if pixel_spacing_mm is None else pixel_spacing_mm[1]
         self.slice_thickness_mm = slice_thickness_mm
         self.patient_id = patient_id
+        # optional slice meta for identity logging
+        self.slice_meta = slice_meta if isinstance(slice_meta, list) else None
         # track current windowing
         cfg = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])
         self.curr_wl = float(cfg['center'])
@@ -407,7 +427,14 @@ class ViewerLRSRHR:
             lin_plane, _, _ = extract_slice(self.lin, clamped_idx)
         if self.bic is not None:
             bic_plane, _, _ = extract_slice(self.bic, clamped_idx)
-        print(f"[Viewer.update] Slice {clamped_idx}/{axis_len-1} | shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} BIL={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is None else tuple(bic_plane.shape)}")
+        print(f"[Viewer.update] Slice {clamped_idx}/{axis_len-1} | shapes HR={tuple(hr_plane.shape)} SR={tuple(sr_plane.shape)} LR={tuple(lr_plane.shape)} BIL={None if lin_plane is None else tuple(lin_plane.shape)} BIC={None if bic_plane is not None else tuple(bic_plane.shape)}")
+        # Slice identity debug (to verify index alignment)
+        if self.slice_meta is not None and 0 <= clamped_idx < len(self.slice_meta):
+            meta = self.slice_meta[clamped_idx]
+            inst = meta.get('InstanceNumber', None)
+            uid = meta.get('SOPInstanceUID', '')
+            path = meta.get('path', '')
+            print(f"[SliceMeta] idx={clamped_idx} InstanceNumber={inst} SOPInstanceUID={uid} Path={path}")
 
         # If ROI is set (in HR coords), synchronize axes limits across views
         if self.roi:
@@ -839,6 +866,8 @@ def main():
     parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
     parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
+    parser.add_argument('--degradation_sampling', type=str, default='volume', choices=['volume','slice','det-slice'], help='Degradation sampling mode (volume|slice|det-slice) [viewer applies uniformly per volume]')
+    parser.add_argument('--deg_seed', type=int, default=42, help='Seed for degradation sampling in viewer')
     args = parser.parse_args()
 
     # ---------- Modell ----------
@@ -855,7 +884,7 @@ def main():
 
 
     # ---------- Daten laden (HU + Meta) ----------
-    hr_hu_vol = load_ct_volume_hu(args.dicom_folder)  # HU via pydicom.apply_modality_lut
+    hr_hu_vol, slice_meta = load_ct_volume_hu(args.dicom_folder)  # HU via pydicom.apply_modality_lut
     (row_mm, col_mm), slice_thickness, patient_id = read_series_metadata(args.dicom_folder)
 
     # Center-Crop HU auf Scale-Multiples (vor jeder Normalisierung!)
@@ -873,6 +902,12 @@ def main():
     hr_norm_vol = hu_to_m11_global(hr_hu_vol, lo, hi)  # [-1,1]
 
     print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
+    print(f"[Vis] Degradation sampling='{args.degradation_sampling}' (viewer uses per-volume) | deg_seed={args.deg_seed}")
+    # For reproducibility in viewer, set numpy RNG with seed (per-volume sampling)
+    try:
+        np.random.seed(int(args.deg_seed))
+    except Exception:
+        pass
     lr_vol = build_lr_volume_from_hr(
         hr_norm_vol, scale=args.scale,
         degradation=args.degradation,
@@ -921,6 +956,7 @@ def main():
         lin_hu_volume=lin_hu_vol,
         bic_hu_volume=bic_hu_vol,
         lr_hu_volume=lr_hu_vol,
+        slice_meta=slice_meta,
     )
 
     print('Navigation: Mouse wheel or arrow keys to navigate slices')
