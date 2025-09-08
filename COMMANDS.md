@@ -52,7 +52,7 @@ python evaluate_ct_model.py \
   --root "preprocessed_data" \
   --split val \
   --model_path finetune_outputs\best.pth \
-  --normalization global --hu_clip -1000 2000 \
+  --hu_clip -1000 2000 \
   --max_patients 3 --max_slices_per_patient 20 --slice_sampling random \
   --degradation blurnoise --dose_factor_range 0.25 0.5 --seed 42
 ```
@@ -63,7 +63,7 @@ python evaluate_ct_model.py \
   --root "preprocessed_data" \
   --split val \
   --model_path finetune_outputs\best.pth \
-  --normalization window --preset soft_tissue --window_center 40 --window_width 400 \
+  --preset soft_tissue --window_center 40 --window_width 400 \
   --degradation blurnoise --seed 42
 ```
 
@@ -199,13 +199,13 @@ Standard: `--degradation blurnoise`. Ziel ist die realistischere Simulation eine
 
 ```bash
 # Evaluation – per-volume Sampling, reproduzierbar
-python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --normalization global --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling volume --deg_seed 42
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling volume --deg_seed 42
 
 # Evaluation – deterministisch pro Slice (det-slice)
-python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --normalization global --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling det-slice --deg_seed 42
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling det-slice --deg_seed 42
 
 # Evaluation – Sampling-Effekte ausschalten
-python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --normalization global --hu_clip -1000 2000 --degradation clean
+python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path finetune_outputs\best.pth --device cuda --scale 2 --hu_clip -1000 2000 --degradation clean
 
 # Visualisierung – per-volume Sampling, reproduzierbar
 python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/14797pp" --model_path finetune_outputs\best.pth --device cuda --preset soft_tissue --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling volume --deg_seed 42

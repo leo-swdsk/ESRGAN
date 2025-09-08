@@ -180,7 +180,6 @@ if __name__ == "__main__":
             scale_factor=args.scale,
             do_random_crop=True,
             hr_patch=args.patch_size,
-            normalization='global',
             hu_clip=(-1000, 2000),
             degradation=args.degradation,
             blur_sigma_range=args.blur_sigma_range,
@@ -195,7 +194,6 @@ if __name__ == "__main__":
             d,
             scale_factor=args.scale,
             do_random_crop=False,
-            normalization='global',
             hu_clip=(-1000, 2000),
             degradation=args.degradation,
             blur_sigma_range=args.blur_sigma_range,
@@ -205,7 +203,7 @@ if __name__ == "__main__":
             antialias_clean=args.antialias_clean
         ) for d in val_dirs
     ])
-    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=args.scale, do_random_crop=False, normalization='global', hu_clip=(-1000, 2000)) for d in test_dirs])
+    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=args.scale, do_random_crop=False, hu_clip=(-1000, 2000)) for d in test_dirs])
 
     # DataLoader
     print("[Data] Creating dataloaders ...")

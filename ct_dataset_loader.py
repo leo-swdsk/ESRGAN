@@ -78,12 +78,11 @@ def find_dicom_files_recursively(base_folder):
     print(f"[CT-Loader] Found {len(dicom_files)} CT image files")
     return sorted(dicom_files)
 
-def load_dicom_as_tensor(path, normalization='global', hu_clip=(-1000, 2000), window_center=40, window_width=400):
+def load_dicom_as_tensor(path, hu_clip=(-1000, 2000)):
     """
     Load a DICOM slice as a normalized tensor [1,H,W].
     - Applies Modality LUT (RescaleSlope/Intercept) to obtain HU when present.
-    - normalization='global': clip to hu_clip (default [-1000,2000]) and scale to [-1,1].
-    - normalization='window': apply window_center/width to scale to [-1,1] (legacy behavior).
+    - Always applies global HU clip (default [-1000,2000]) and scales to [-1,1].
     """
     ds = pydicom.dcmread(path, force=True)
     arr = ds.pixel_array
@@ -92,14 +91,12 @@ def load_dicom_as_tensor(path, normalization='global', hu_clip=(-1000, 2000), wi
     except Exception:
         hu = arr.astype(np.float32)
 
-    if normalization == 'window':
-        img = apply_window(hu, window_center, window_width)
-    else: #bei global normalization wird der HU-Wert zwischen -1000 und 2000 geclippt und dann auf [-1,1] skaliert
-        lo, hi = hu_clip
-        img = np.clip(hu, lo, hi)
-        img = (img - lo) / (hi - lo)  # [0,1]
-        img = img * 2 - 1             # [-1,1]
-        img = img.astype(np.float32)
+    # Global normalization to [-1,1] with HU clip
+    lo, hi = hu_clip
+    img = np.clip(hu, lo, hi)
+    img = (img - lo) / (hi - lo)  # [0,1]
+    img = img * 2 - 1             # [-1,1]
+    img = img.astype(np.float32)
 
     tensor = torch.tensor(img).unsqueeze(0)  # [1, H, W]
     return tensor
@@ -146,8 +143,8 @@ def _compute_kernel_size_from_sigma(sigma: float) -> int:
     return k
 
 class CT_Dataset_SR(Dataset):
-    def __init__(self, dicom_folder, window_center=40, window_width=400, scale_factor=2, max_slices=None,
-                 do_random_crop=True, hr_patch=128, normalization='global', hu_clip=(-1000, 2000),
+    def __init__(self, dicom_folder, scale_factor=2, max_slices=None,
+                 do_random_crop=True, hr_patch=128, hu_clip=(-1000, 2000),
                  degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
                  noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
                  reverse_order=True,
@@ -158,12 +155,9 @@ class CT_Dataset_SR(Dataset):
             self.paths = list(reversed(self.paths))
         if max_slices:
             self.paths = self.paths[:max_slices]
-        self.wc = window_center
-        self.ww = window_width
         self.scale = scale_factor
         self.do_random_crop = do_random_crop
         self.hr_patch = hr_patch
-        self.normalization = normalization  # 'global' (default) or 'window'
         self.hu_clip = hu_clip
         # degradation settings
         self.degradation = degradation  # 'clean' | 'blur' | 'blurnoise'
@@ -216,11 +210,7 @@ class CT_Dataset_SR(Dataset):
             }
             # public alias for evaluator JSON logging
             self.deg_params = dict(self._deg_params)
-        if self.normalization == 'global':
-            norm_desc = f"global_HU_clip={self.hu_clip}"
-        else:
-            norm_desc = f"window=({self.wc},{self.ww})"
-        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | norm={norm_desc} | random_crop={self.do_random_crop}")
+        print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | norm=global_HU_clip={self.hu_clip} | random_crop={self.do_random_crop}")
         print(f"[CT-Loader] Degradation='{self.degradation}' | blur_sigma_range={self.blur_sigma_range} | blur_kernel={self.blur_kernel} | noise_sigma_range_norm={self.noise_sigma_range_norm} | dose_factor_range={self.dose_factor_range}")
         print(f"[CT-Loader] Degradation sampling mode='{self.degradation_sampling}' | deg_seed={self.deg_seed}")
 
@@ -228,8 +218,7 @@ class CT_Dataset_SR(Dataset):
         return len(self.paths)
 
     def __getitem__(self, idx):
-        hr_full = load_dicom_as_tensor(self.paths[idx], normalization=self.normalization, hu_clip=self.hu_clip,
-                                       window_center=self.wc, window_width=self.ww)   # [1, H, W]
+        hr_full = load_dicom_as_tensor(self.paths[idx], hu_clip=self.hu_clip)   # [1, H, W]
         # choose HR region
         if self.do_random_crop and self.hr_patch is not None:
             _, H, W = hr_full.shape

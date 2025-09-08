@@ -47,7 +47,7 @@ def ensure_dir(path):
 
 
 def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda', scale=2,
-                   normalization='global', hu_clip=(-1000, 2000), preset='soft_tissue', window_center=40, window_width=400,
+                   hu_clip=(-1000, 2000), preset=None, window_center=None, window_width=None,
                    max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
                    degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
                    noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
@@ -62,11 +62,13 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         'output_dir': output_dir,
         'device': device,
         'scale': scale,
-        'normalization': normalization,
         'hu_clip': hu_clip,
-        'preset': preset,
-        'window_center': window_center,
-        'window_width': window_width,
+        'metrics': {
+            'mode': None,
+            'preset': preset,
+            'window_center': window_center,
+            'window_width': window_width,
+        },
         'max_patients': max_patients,
         'max_slices_per_patient': max_slices_per_patient,
         'slice_sampling': slice_sampling,
@@ -99,26 +101,28 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     if max_patients is not None:
         patient_dirs = patient_dirs[:max_patients]
 
-    # Build normalization tag for file names
-    if normalization == 'global':
+    # Decide metrics mode and tag
+    if isinstance(preset, str) and len(preset) > 0:
+        metrics_mode = 'window'
+        metrics_tag = f"preset-{preset}"
+    elif window_center is not None and window_width is not None:
+        metrics_mode = 'window'
+        metrics_tag = f"wlww_{int(window_center)}_{int(window_width)}"
+    else:
+        metrics_mode = 'global'
         try:
             lo, hi = float(hu_clip[0]), float(hu_clip[1])
-            norm_tag = f"globalHU_{int(lo)}_{int(hi)}"
+            metrics_tag = f"globalHU_{int(lo)}_{int(hi)}"
         except Exception:
-            norm_tag = "globalHU"
-    else:
-        # prefer preset name if provided
-        if isinstance(preset, str) and len(preset) > 0:
-            norm_tag = f"preset-{preset}"
-        else:
-            norm_tag = f"wlww_{int(window_center)}_{int(window_width)}"
+            metrics_tag = "globalHU"
+    eval_config['metrics']['mode'] = metrics_mode
 
     # Output files include model name tag and normalization tag; also append split suffix for clarity
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
     limited = (max_patients is not None) or (max_slices_per_patient is not None)
     suffix = f"_on_{'limited_' if limited else ''}{split_name}_set"
-    csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}__{norm_tag}{suffix}.csv")
-    json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}__{norm_tag}{suffix}.json")
+    csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}__{metrics_tag}{suffix}.csv")
+    json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}__{metrics_tag}{suffix}.json")
 
     # Collect per-slice metrics and per-patient aggregations
     fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']
@@ -127,10 +131,10 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
     rng = random.Random(seed)
 
-    if normalization == 'global':
-        print(f"[Eval] Using normalization='global' | hu_clip={hu_clip} (preset/WL/WW ignored)")
+    if metrics_mode == 'global':
+        print(f"[Eval] Metrics mode: global | hu_clip={hu_clip}")
     else:
-        print(f"[Eval] Using normalization='window' | preset={preset} | WL/WW=({window_center},{window_width})")
+        print(f"[Eval] Metrics mode: window | preset={preset} | WL/WW=({window_center},{window_width})")
     print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={blur_sigma_range} | blur_kernel={blur_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
     print(f"[Eval] Degradation sampling='{degradation_sampling}' | deg_seed={deg_seed}")
     with torch.no_grad():
@@ -142,10 +146,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 patient_dir,
                 scale_factor=scale,
                 do_random_crop=False,
-                normalization=normalization,
                 hu_clip=tuple(hu_clip),
-                window_center=window_center,
-                window_width=window_width,
                 degradation=degradation,
                 blur_sigma_range=blur_sigma_range,
                 blur_kernel=blur_kernel,
@@ -199,8 +200,8 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                     pass
                 results = compare_methods(
                     lr, hr, model,
-                    normalization=normalization,
                     hu_clip=hu_clip,
+                    metrics_mode=metrics_mode,
                     window_center=window_center,
                     window_width=window_width,
                     metrics_device=('cuda' if (device_t.type == 'cuda' and torch.cuda.is_available()) else 'cpu')
@@ -322,12 +323,11 @@ def main():
     parser.add_argument('--output_dir', type=str, default='eval_results', help='Directory to write CSV/JSON outputs')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
-    # Normalization/windowing (default: global HU clip [-1000,2000])
-    parser.add_argument('--normalization', type=str, default='global', choices=['global', 'window'], help='Normalization mode (default: global)')
-    parser.add_argument('--hu_clip', type=float, nargs=2, default=[-1000.0, 2000.0], help='HU clip range for global normalization [lo hi]')
-    parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset name for naming (if window mode used)')
-    parser.add_argument('--window_center', type=float, default=40.0, help='Window center (if normalization=window)')
-    parser.add_argument('--window_width', type=float, default=400.0, help='Window width (if normalization=window)')
+    # Metrics windowing (degradation always global HU clip [-1000,2000])
+    parser.add_argument('--hu_clip', type=float, nargs=2, default=[-1000.0, 2000.0], help='HU clip range for degradation/global denorm [lo hi]')
+    parser.add_argument('--preset', type=str, default=None, help='Window preset name for metrics (overrides WL/WW if set)')
+    parser.add_argument('--window_center', type=float, default=None, help='Window center for metrics (used if preset not set)')
+    parser.add_argument('--window_width', type=float, default=None, help='Window width for metrics (used if preset not set)')
     parser.add_argument('--max_patients', type=int, default=None, help='Optional limit of patients for a quick run')
     parser.add_argument('--max_slices_per_patient', type=int, default=None, help='Optional limit of slices per patient for a quick run')
     parser.add_argument('--slice_sampling', type=str, default='random', choices=['first', 'random'], help='How to select slices when limited')
@@ -350,7 +350,6 @@ def main():
     print("[Eval-Args] output_dir=", args.output_dir)
     print("[Eval-Args] device=", args.device)
     print("[Eval-Args] scale=", args.scale)
-    print("[Eval-Args] normalization=", args.normalization)
     print("[Eval-Args] hu_clip=", args.hu_clip)
     print("[Eval-Args] preset=", args.preset)
     print("[Eval-Args] window_center=", args.window_center)
@@ -375,7 +374,6 @@ def main():
         output_dir=args.output_dir,
         device=args.device,
         scale=args.scale,
-        normalization=args.normalization,
         hu_clip=tuple(args.hu_clip),
         preset=args.preset,
         window_center=args.window_center,

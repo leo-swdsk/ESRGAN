@@ -217,30 +217,34 @@ def _compute_pi_with_components(grayscale_tensor_m1_1):
     return pi_val, ma_val, niqe_val
 
 
-def _denorm_to_hu(x_m11, normalization, hu_clip, wl, ww):
-    # x_m11: [1,H,W] in [-1,1]
+def _denorm_global_to_hu(x_m11, hu_clip):
+    # x_m11: [1,H,W] in [-1,1] normalized with global HU clip
     x01 = (x_m11.clamp(-1.0, 1.0) + 1.0) * 0.5
-    if normalization == 'global':
-        lo, hi = float(hu_clip[0]), float(hu_clip[1])
-        return x01 * (hi - lo) + lo
-    else:  # 'window'
-        min_val = float(wl) - float(ww) / 2.0
-        max_val = float(wl) + float(ww) / 2.0
-        return x01 * (max_val - min_val) + min_val
+    lo, hi = float(hu_clip[0]), float(hu_clip[1])
+    return x01 * (hi - lo) + lo
 
-def evaluate_metrics(sr_tensor, hr_tensor, normalization, hu_clip, window_center, window_width, metrics_device):
-    # -> HU
-    sr_hu = _denorm_to_hu(sr_tensor, normalization, hu_clip, window_center, window_width).squeeze(0)
-    hr_hu = _denorm_to_hu(hr_tensor, normalization, hu_clip, window_center, window_width).squeeze(0)
+def evaluate_metrics(sr_tensor, hr_tensor, *, hu_clip=(-1000.0, 2000.0), metrics_mode='global', window_center=None, window_width=None, metrics_device='cpu'):
+    # -> HU via global denormalization
+    sr_hu = _denorm_global_to_hu(sr_tensor, hu_clip).squeeze(0)
+    hr_hu = _denorm_global_to_hu(hr_tensor, hu_clip).squeeze(0)
+    # metrics preprocessing mode
+    if metrics_mode == 'window':
+        mode = 'window'
+        wl = float(window_center)
+        ww = float(window_width)
+    else:
+        mode = 'global'
+        wl = None
+        ww = None
     m = compute_all_metrics(sr_hu, hr_hu,
-                            mode='window', wl=window_center, ww=window_width,
+                            mode=mode, wl=wl, ww=ww,
                             lpips_backbone='alex', device=metrics_device,
                             return_components=True)
     return {k: float(m[k]) for k in ['MSE','RMSE','MAE','PSNR','SSIM','LPIPS','MA','NIQE','PI']}
 
 def compare_methods(lr_tensor, hr_tensor, model,
-                    *, normalization='global', hu_clip=(-1000.0, 2000.0),
-                    window_center=40.0, window_width=400.0,
+                    *, hu_clip=(-1000.0, 2000.0),
+                    metrics_mode='global', window_center=None, window_width=None,
                     metrics_device='cpu'):
     model.eval()
     with torch.no_grad():
@@ -277,9 +281,9 @@ def compare_methods(lr_tensor, hr_tensor, model,
 
         # Compute metrics
         results = {
-        "Model (RRDB)": evaluate_metrics(sr_m, hr_m, normalization, hu_clip, window_center, window_width, metrics_device),
-        "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_m, normalization, hu_clip, window_center, window_width, metrics_device),
-        "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_m, normalization, hu_clip, window_center, window_width, metrics_device),
+        "Model (RRDB)": evaluate_metrics(sr_m, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
+        "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
+        "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
     }
     return results
 
