@@ -215,3 +215,17 @@ python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/14797pp" --model_
 ```
 
 - Hinweis: Die JSON-Summary aus `evaluate_ct_model.py` enthält nun zusätzlich `degradation_sampling` und `deg_seed`.
+
+### Gleiche Metriken: Evaluation und Viewer
+
+- Diese beiden Befehle verwenden dieselbe Metrik-Skalierung.
+  - Evaluation: Default ist globalHU [-1000, 2000] (kein Preset/WL/WW gesetzt).
+  - Viewer: `--preset global` entspricht exakt HU [-1000, 2000] (WL=500, WW=3000).
+
+```bash
+python evaluate_ct_model.py --root preprocessed_data --split test --max_patients 1 --max_slices_per_patient 10 --slice_sampling first
+```
+
+```bash
+python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data/14655pp" --preset global
+```
