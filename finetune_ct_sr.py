@@ -240,6 +240,13 @@ def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, n
             antialias_clean=antialias_clean
         ) for d in train_dirs
     ])
+
+    # Deterministic seeds per validation patient for reproducibility
+    import hashlib
+    def _fixed_seed_for_path(path: str, base: int = 42) -> int:
+        h = hashlib.sha256((str(base) + '|' + os.path.normpath(path)).encode('utf-8')).hexdigest()
+        return int(h[:8], 16)
+
     val_ds = ConcatDataset([
         CT_Dataset_SR(
             d,
@@ -250,12 +257,14 @@ def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, n
             blur_kernel=blur_kernel,
             noise_sigma_range_norm=tuple(noise_sigma_range_norm),
             dose_factor_range=tuple(dose_factor_range),
-            antialias_clean=antialias_clean
+            antialias_clean=antialias_clean,
+            degradation_sampling='volume',
+            deg_seed=_fixed_seed_for_path(d, base=42)
         ) for d in val_dirs
     ])
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-                              pin_memory=True, persistent_workers=num_workers > 0)
+                              pin_memory=True, persistent_workers=False)
     # Validation on whole slices (variable sizes) → batch_size=1 to avoid collate size mismatches
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=max(1, num_workers // 2),
                             pin_memory=True, persistent_workers=(num_workers // 2) > 0)
@@ -405,33 +414,52 @@ def train_one_epoch(
 # -----------------------------
 # Checkpointing / Plotting
 # -----------------------------
-def save_checkpoint(out_dir: str, G_ema: nn.Module, G_live: nn.Module, optimizer_g: torch.optim.Optimizer, epoch: int, tag: str, *, metadata: dict = None):
-    """Save checkpoint with both EMA weights and live weights"""
+def save_checkpoint(out_dir: str,
+                    G_ema: nn.Module,
+                    G_live: nn.Module,
+                    D: nn.Module,
+                    optimizer_g: torch.optim.Optimizer,
+                    optimizer_d: torch.optim.Optimizer,
+                    scaler: torch_amp.GradScaler,
+                    scheduler_g: torch.optim.lr_scheduler._LRScheduler,
+                    scheduler_d: torch.optim.lr_scheduler._LRScheduler,
+                    epoch: int,
+                    global_step: int,
+                    tag: str,
+                    *, metadata: dict = None,
+                    ema_decay: float = 0.999):
+    """Save checkpoint with complete training state (EMA/live, G/D, optimizers, schedulers, scaler)."""
     os.makedirs(out_dir, exist_ok=True)
-    
-    # Save EMA checkpoint (stabilized weights)
+
     path_ema = os.path.join(out_dir, f'{tag}.pth')
-    payload_ema = {
-        'epoch': epoch,
-        'model': G_ema.state_dict(),
+    payload_common = {
+        'epoch': int(epoch),
+        'global_step': int(global_step),
+        'D': D.state_dict(),
         'optimizer_g': optimizer_g.state_dict(),
+        'optimizer_d': optimizer_d.state_dict(),
+        'scaler': (scaler.state_dict() if (scaler is not None and isinstance(scaler, torch_amp.GradScaler)) else None),
+        'scheduler_g': scheduler_g.state_dict() if scheduler_g is not None else None,
+        'scheduler_d': scheduler_d.state_dict() if scheduler_d is not None else None,
+        'ema_decay': float(ema_decay),
+        'meta': metadata
+    }
+    payload_ema = {
+        **payload_common,
+        'model': G_ema.state_dict(),
+        'ema_model': G_ema.state_dict(),
         'weights_type': 'ema'
     }
-    if metadata is not None:
-        payload_ema['meta'] = metadata
     torch.save(payload_ema, path_ema)
     print(f"[CKPT] Saved {tag} (EMA) -> {path_ema}")
-    
-    # Save live weights checkpoint (raw training weights)
+
     path_live = os.path.join(out_dir, f'{tag}_live.pth')
     payload_live = {
-        'epoch': epoch,
+        **payload_common,
         'model': G_live.state_dict(),
-        'optimizer_g': optimizer_g.state_dict(),
+        'ema_model': G_ema.state_dict(),
         'weights_type': 'live'
     }
-    if metadata is not None:
-        payload_live['meta'] = metadata
     torch.save(payload_live, path_live)
     print(f"[CKPT] Saved {tag} (Live) -> {path_live}")
 
@@ -477,6 +505,7 @@ def main():
     parser.add_argument('--patch', type=int, default=192)
     parser.add_argument('--pretrained_g', type=str, default='rrdb_x2_blurnoise_best.pth')
     parser.add_argument('--out_dir', type=str, default='finetune_outputs')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint (ema/live) to resume training')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--lambda_perc', type=float, default=0.10)
     parser.add_argument('--lambda_gan', type=float, default=0.005)
@@ -570,9 +599,64 @@ def main():
     best_mae = 1e9
     epochs_no_improve = 0
 
+    # Resume training if provided
+    start_epoch = 1
     iters_seen = 0
-    for epoch in range(1, args.epochs + 1):
+    if args.resume and os.path.isfile(args.resume):
+        try:
+            ckpt = torch.load(args.resume, map_location=device)
+            if isinstance(ckpt, dict):
+                # Prefer live weights when resuming
+                if 'model' in ckpt:
+                    G.load_state_dict(ckpt['model'], strict=True)
+                if 'ema_model' in ckpt:
+                    try:
+                        ema.ema_model.load_state_dict(ckpt['ema_model'], strict=True)
+                    except Exception:
+                        pass
+                if 'D' in ckpt:
+                    D.load_state_dict(ckpt['D'], strict=True)
+                if 'optimizer_g' in ckpt:
+                    optimizer_g.load_state_dict(ckpt['optimizer_g'])
+                if 'optimizer_d' in ckpt:
+                    optimizer_d.load_state_dict(ckpt['optimizer_d'])
+                if 'scheduler_g' in ckpt and ckpt['scheduler_g'] is not None:
+                    try:
+                        scheduler_g.load_state_dict(ckpt['scheduler_g'])
+                    except Exception:
+                        pass
+                if 'scheduler_d' in ckpt and ckpt['scheduler_d'] is not None:
+                    try:
+                        scheduler_d.load_state_dict(ckpt['scheduler_d'])
+                    except Exception:
+                        pass
+                if use_cuda and ('scaler' in ckpt and ckpt['scaler'] is not None):
+                    try:
+                        scaler.load_state_dict(ckpt['scaler'])
+                    except Exception:
+                        pass
+                if 'epoch' in ckpt:
+                    start_epoch = int(ckpt['epoch']) + 1
+                iters_seen = int(ckpt.get('global_step', 0))
+                best_psnr = float(ckpt.get('best_psnr', best_psnr))
+                best_mae = float(ckpt.get('best_mae', best_mae))
+                print(f"[Resume] Resumed from {args.resume} at epoch={start_epoch} global_step={iters_seen}")
+        except Exception as e:
+            print(f"[Resume] Failed to load resume checkpoint: {e}")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         print(f"[Epoch {epoch}/{args.epochs}] Starting ...")
+        # Per-epoch resample for training datasets (volume-wise)
+        subdatasets = getattr(train_loader.dataset, 'datasets', None)
+        if subdatasets is not None:
+            for ds in subdatasets:
+                if hasattr(ds, 'resample_volume_params'):
+                    ds.resample_volume_params(epoch_seed=epoch)
+            print(f"[Deg-Resample] Training volumes resampled for epoch {epoch}")
+        else:
+            if hasattr(train_loader.dataset, 'resample_volume_params'):
+                train_loader.dataset.resample_volume_params(epoch_seed=epoch)
+                print(f"[Deg-Resample] Training volumes resampled for epoch {epoch}")
         warmup_iters_remaining = max(0, args.warmup_g_only - iters_seen)
         avg_train_total = train_one_epoch(
             G, D, ema, train_loader, optimizer_g, optimizer_d, scaler, perceptual, ragan, device,
@@ -603,8 +687,20 @@ def main():
             best_mae = val_metrics['MAE']
             improved = True
         if improved:
-            save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='best', metadata=meta)
-        save_checkpoint(args.out_dir, ema.ema_model, G, optimizer_g, epoch, tag='last', metadata=meta)
+            save_checkpoint(
+                args.out_dir, ema.ema_model, G, D,
+                optimizer_g, optimizer_d, scaler,
+                scheduler_g, scheduler_d,
+                epoch, iters_seen,
+                tag='best', metadata=meta, ema_decay=ema.decay
+            )
+        save_checkpoint(
+            args.out_dir, ema.ema_model, G, D,
+            optimizer_g, optimizer_d, scaler,
+            scheduler_g, scheduler_d,
+            epoch, iters_seen,
+            tag='last', metadata=meta, ema_decay=ema.decay
+        )
 
         # Early stopping on selected metric
         if args.patience is not None:

@@ -317,7 +317,9 @@ class CT_Dataset_SR(Dataset):
 
         # one-time log of actual parameters used
         if not self._deg_logged:
-            print(f"[Deg] mode={self.degradation_sampling} blur_sigma={blur_sigma_used if blur_sigma_used is not None else 'NA'} noise_sigma={noise_sigma_used if noise_sigma_used is not None else 'NA'} dose={dose_used if dose_used is not None else 'NA'}")
+            # print(f"[Deg] mode={self.degradation_sampling} blur_sigma={blur_sigma_used if blur_sigma_used is not None else 'NA'} noise_sigma={noise_sigma_used if noise_sigma_used is not None else 'NA'} dose={dose_used if dose_used is not None else 'NA'}")
+            # Note: This Debug-Print shows the effectively used degradation-parameter
+            # (σ, noise, dose) an. Useful for verification and debugging, but too much console logs when working with big datasets
             self._deg_logged = True
 
         return lr, hr

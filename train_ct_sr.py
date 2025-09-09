@@ -5,6 +5,10 @@ from torch.utils.data import DataLoader
 from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
 import os
+import sys
+import time
+import csv
+from datetime import datetime
 import numpy as np
 import argparse
 import json
@@ -28,10 +32,26 @@ def validate(model, dataloader, criterion, device):
     model.train()
     return total_loss / max(1, len(dataloader))
 
+def _ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
+
+
+class _Tee:
+    def __init__(self, log_path):
+        self._stdout = sys.stdout
+        # line-buffered
+        self._fh = open(log_path, 'a', encoding='utf-8', buffering=1)
+    def write(self, data):
+        self._stdout.write(data)
+        self._fh.write(data)
+    def flush(self):
+        self._stdout.flush()
+        self._fh.flush()
+
+
 # Trainingsfunktion
 def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, patience=5,
-                   save_best_path="rrdb_ct_best.pth", save_last_path="rrdb_ct_last.pth",
-                   plot_path="training_curve.png", *, metadata: dict = None):
+                   run_dir=None, resume_path=None, *, metadata: dict = None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Train] Device: {device}")
     model = model.to(device)
@@ -39,12 +59,47 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     criterion = nn.L1Loss()  
     use_cuda = (device.type == 'cuda')
 
-    best_val = float("inf")
+    # Paths inside run_dir
+    _ensure_dir(run_dir)
+    ckpt_best = os.path.join(run_dir, 'best.pth')
+    ckpt_last = os.path.join(run_dir, 'last.pth')
+    csv_path  = os.path.join(run_dir, 'metrics.csv')
+    plot_path = os.path.join(run_dir, 'training_curve.png')
+
+    # CSV header
+    if not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'global_step', 'train_l1', 'val_l1', 'lr', 'time_sec'])
+
+    # Resume support
+    best_val = float('inf')
+    global_step = 0
+    start_epoch = 0
+    scaler = amp.GradScaler(enabled=use_cuda)
+    if resume_path is not None and os.path.isfile(resume_path):
+        ckpt = torch.load(resume_path, map_location=device)
+        if isinstance(ckpt, dict) and 'model' in ckpt:
+            try:
+                model.load_state_dict(ckpt['model'])
+                if 'optimizer_g' in ckpt:
+                    optimizer.load_state_dict(ckpt['optimizer_g'])
+                if use_cuda and ('scaler' in ckpt and ckpt['scaler'] is not None):
+                    try:
+                        scaler.load_state_dict(ckpt['scaler'])
+                    except Exception:
+                        pass
+                best_val = float(ckpt.get('best_val', best_val))
+                start_epoch = int(ckpt.get('epoch', 0))
+                global_step = int(ckpt.get('global_step', 0))
+                print(f"[Resume] Loaded checkpoint from {resume_path} | epoch={start_epoch} global_step={global_step} best_val={best_val:.6f}")
+            except Exception as e:
+                print(f"[Resume] Failed to load checkpoint: {e}")
+
     epochs_no_improve = 0
     train_losses, val_losses = [], []
 
-    scaler = amp.GradScaler(enabled=use_cuda)
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         # Resample degradation params for all training sub-datasets (ConcatDataset)
         subdatasets = getattr(train_loader.dataset, "datasets", None)
         if subdatasets is not None:
@@ -57,6 +112,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
                 train_loader.dataset.resample_volume_params(epoch_seed=epoch)
                 print(f"[Deg-Resample] Training volumes resampled for epoch {epoch}")
         model.train()
+        t0 = time.perf_counter()
         total_train = 0.0
         for batch_idx, (lr_imgs, hr_imgs) in enumerate(train_loader, start=1):
             lr_imgs = lr_imgs.to(device, non_blocking=True)
@@ -72,6 +128,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
             scaler.update()
 
             total_train += loss.item()
+            global_step += 1
             if batch_idx % 50 == 0:
                 print(f"  [Batch {batch_idx}/{len(train_loader)}] train L1={loss.item():.5f}")
             # (optional) Speicher aufräumen:
@@ -83,17 +140,34 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
         train_losses.append(avg_train)
         val_losses.append(avg_val)
 
-        print(f"[Train] Epoch {epoch+1} done | train L1: {avg_train:.6f} | val L1: {avg_val:.6f}")
+        elapsed = time.perf_counter() - t0
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"[Train] Epoch {epoch+1}/{num_epochs} done | train L1: {avg_train:.6f} | val L1: {avg_val:.6f} | lr={current_lr:.6f} | time={elapsed:.1f}s")
+
+        # Append CSV row
+        try:
+            with open(csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch + 1, global_step, f"{avg_train:.6f}", f"{avg_val:.6f}", f"{current_lr:.6f}", f"{elapsed:.2f}"])
+        except Exception as e:
+            print(f"[CSV] Could not append metrics: {e}")
 
         # Early Stopping + Best speichern
         if avg_val < best_val - 1e-6:
             best_val = avg_val
             epochs_no_improve = 0
-            payload = {'epoch': epoch+1, 'model': model.state_dict()}
-            if metadata is not None:
-                payload['meta'] = metadata
-            torch.save(payload, save_best_path)
-            print(f"[Train] Saved new best model -> {save_best_path}")
+            payload = {
+                'epoch': epoch + 1,
+                'global_step': global_step,
+                'model': model.state_dict(),
+                'optimizer_g': optimizer.state_dict(),
+                'scaler': scaler.state_dict() if use_cuda else None,
+                'weights_type': 'pretrain_l1',
+                'best_val': float(best_val),
+                'meta': metadata
+            }
+            torch.save(payload, ckpt_best)
+            print(f"[CKPT] Saved best -> {ckpt_best}")
         else:
             epochs_no_improve += 1
             print(f"[Train] No val improvement ({epochs_no_improve}/{patience})")
@@ -102,11 +176,18 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
                 break
 
     # Letztes Modell speichern
-    payload_last = {'epoch': len(train_losses), 'model': model.state_dict()}
-    if metadata is not None:
-        payload_last['meta'] = metadata
-    torch.save(payload_last, save_last_path)
-    print(f"[Train] Saved last model -> {save_last_path}")
+    payload_last = {
+        'epoch': start_epoch + len(train_losses),
+        'global_step': global_step,
+        'model': model.state_dict(),
+        'optimizer_g': optimizer.state_dict(),
+        'scaler': scaler.state_dict() if use_cuda else None,
+        'weights_type': 'pretrain_l1',
+        'best_val': float(best_val),
+        'meta': metadata
+    }
+    torch.save(payload_last, ckpt_last)
+    print(f"[CKPT] Saved last -> {ckpt_last}")
 
     # Plot speichern
     try:
@@ -119,7 +200,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
         plt.tight_layout()
         plt.savefig(plot_path, dpi=150)
         plt.close()
-        print(f"[Train] Saved training curve -> {plot_path}")
+        print(f"[Plot] Saved training curve -> {plot_path}")
     except Exception as e:
         print(f"[Train] Could not save plot: {e}")
 
@@ -140,6 +221,7 @@ if __name__ == "__main__":
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (epochs)')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--num_workers', type=int, default=4, help='Dataloader workers for training')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     # Degradation options
     parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation')
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma (in normalized image units). If None, defaults by scale (x2≈0.8±0.1, x4≈1.2±0.15).')
@@ -151,6 +233,15 @@ if __name__ == "__main__":
 
     if args.patch_size % args.scale != 0:
         raise ValueError(f"patch_size ({args.patch_size}) must be divisible by scale ({args.scale})")
+
+    # Build run directory and tee logger
+    exp_name = f"rrdb_x{args.scale}_{args.degradation}"
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    run_dir = os.path.join('runs', f"{exp_name}_{timestamp}")
+    _ensure_dir(run_dir)
+    # Tee logger
+    log_path = os.path.join(run_dir, 'train.log')
+    sys.stdout = _Tee(log_path)
 
     print("[Args] Training configuration:")
     print(f"  data_root   : {args.data_root}")
@@ -167,6 +258,7 @@ if __name__ == "__main__":
     print(f"  noise_sigma_range_norm : {args.noise_sigma_range_norm}")
     print(f"  dose_factor_range : {args.dose_factor_range}")
     print(f"  antialias_clean : {args.antialias_clean}")
+    print(f"  resume      : {args.resume}")
 
     root = args.data_root
     patient_dirs = [os.path.join(root, d) for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
@@ -259,26 +351,42 @@ if __name__ == "__main__":
     print(f"[Init] Creating model RRDBNet_CT(scale={args.scale}) ...")
     model = RRDBNet_CT(scale=args.scale)
 
-    # Experiment naming and metadata
-    exp_name = f"rrdb_x{args.scale}_{args.degradation}"
-    best_path = f"{exp_name}_best.pth"
-    last_path = f"{exp_name}_last.pth"
-    plot_path = f"{exp_name}_training_curve.png"
+    # Metadata/config JSON (extended)
+    device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    amp_enabled = torch.cuda.is_available()
     meta = {
         "experiment": exp_name,
+        "run_dir": run_dir,
+        "device": device_str,
+        "amp_enabled": bool(amp_enabled),
+        "optimizer": {"name": "Adam", "lr": args.lr, "betas": [0.9, 0.999]},
         "scale_factor": args.scale,
+        "patch_size": args.patch_size,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
         "degradation": args.degradation,
         "blur_sigma_range": args.blur_sigma_range if args.blur_sigma_range is not None else (None),
         "blur_kernel": args.blur_kernel,
         "noise_sigma_range_norm": args.noise_sigma_range_norm,
         "dose_factor_range": args.dose_factor_range,
-        "notes": "Training with configured degradation; jitter per patch where applicable"
+        "degradation_sampling": {
+            "train": "volume (per-epoch resample)",
+            "val": "volume (fixed per patient)",
+            "test": "volume (fixed per patient)"
+        },
+        "splits": {
+            "n_train_vols": len(train_dirs),
+            "n_val_vols": len(val_dirs),
+            "n_test_vols": len(test_dirs)
+        },
+        "notes": "L1 pretraining with per-epoch volume-wise degradation resampling"
     }
     # write JSON sidecar
     try:
-        with open(f"{exp_name}.json", 'w') as f:
+        _ensure_dir(run_dir)
+        with open(os.path.join(run_dir, "config.json"), 'w') as f:
             json.dump(meta, f, indent=2)
-        print(f"[Meta] Wrote experiment metadata JSON -> {exp_name}.json")
+        print(f"[Meta] Wrote experiment metadata JSON -> {os.path.join(run_dir, 'config.json')}")
     except Exception as e:
         print(f"[Meta] Could not write metadata JSON: {e}")
 
@@ -286,9 +394,8 @@ if __name__ == "__main__":
     trained_model, train_losses, val_losses = train_sr_model(
         model, train_loader, val_loader,
         num_epochs=args.epochs, lr=args.lr, patience=args.patience,
-        save_best_path=best_path,
-        save_last_path=last_path,
-        plot_path=plot_path,
+        run_dir=run_dir,
+        resume_path=args.resume,
         metadata=meta
     )
 

@@ -2,6 +2,7 @@
 .vscode
 eval_results/
 splits/
+runs/
 
 # file type
 *.svg
