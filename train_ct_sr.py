@@ -354,6 +354,27 @@ if __name__ == "__main__":
     # Metadata/config JSON (extended)
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     amp_enabled = torch.cuda.is_available()
+    # Effective blur sigma range and kernel (fill defaults when not provided)
+    if args.degradation in ('blur', 'blurnoise'):
+        if args.blur_sigma_range is None:
+            base_sigma = 0.8 if int(args.scale) == 2 else (1.2 if int(args.scale) == 4 else 0.8)
+            jitter = 0.1 if int(args.scale) == 2 else 0.15
+            eff_lo = max(1e-6, base_sigma - jitter)
+            eff_hi = base_sigma + jitter
+        else:
+            eff_lo = float(args.blur_sigma_range[0])
+            eff_hi = float(args.blur_sigma_range[1])
+        blur_sigma_range_eff = [eff_lo, eff_hi]
+        if args.blur_kernel is not None:
+            blur_kernel_eff = int(args.blur_kernel)
+        else:
+            mid_sigma = 0.5 * (eff_lo + eff_hi)
+            k = int(max(3, round(6.0 * float(mid_sigma))))
+            blur_kernel_eff = k if (k % 2 == 1) else (k + 1)
+    else:
+        blur_sigma_range_eff = None
+        blur_kernel_eff = None
+
     meta = {
         "experiment": exp_name,
         "run_dir": run_dir,
@@ -365,8 +386,8 @@ if __name__ == "__main__":
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
         "degradation": args.degradation,
-        "blur_sigma_range": args.blur_sigma_range if args.blur_sigma_range is not None else (None),
-        "blur_kernel": args.blur_kernel,
+        "blur_sigma_range": blur_sigma_range_eff,
+        "blur_kernel": blur_kernel_eff,
         "noise_sigma_range_norm": args.noise_sigma_range_norm,
         "dose_factor_range": args.dose_factor_range,
         "degradation_sampling": {
