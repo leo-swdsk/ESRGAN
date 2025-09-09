@@ -1,4 +1,5 @@
 import os
+import hashlib
 import torch
 import pydicom
 import numpy as np
@@ -151,6 +152,7 @@ class CT_Dataset_SR(Dataset):
                  reverse_order=True,
                  degradation_sampling: Literal['volume','slice','det-slice'] = 'volume', deg_seed: int = 42):
         self.paths = find_dicom_files_recursively(dicom_folder)
+        self.patient_id = os.path.basename(os.path.normpath(dicom_folder))
         if reverse_order:
             # align ordering with viewer: last loaded slice first (index 0)
             self.paths = list(reversed(self.paths))
@@ -179,41 +181,58 @@ class CT_Dataset_SR(Dataset):
         self._deg_params = None
         self._deg_logged = False
         if self.degradation_sampling == 'volume' and self.degradation in ('blur','blurnoise'):
-            rng = np.random.default_rng(self.deg_seed)
-            # blur sigma
-            sig_lo, sig_hi = self.blur_sigma_range
-            blur_sigma = float(rng.uniform(sig_lo, sig_hi))
-            if self.blur_kernel is not None:
-                blur_k = int(self.blur_kernel)
-                if blur_k % 2 == 0:
-                    blur_k += 1
-            else:
-                # match heuristic _compute_kernel_size_from_sigma
-                k = int(max(3, round(6.0 * float(blur_sigma))))
-                blur_k = k if (k % 2 == 1) else (k + 1)
-            # noise/dose
-            if self.degradation == 'blurnoise':
-                n_lo, n_hi = self.noise_sigma_range_norm
-                noise_sigma = float(rng.uniform(n_lo, n_hi))
-                d_lo, d_hi = self.dose_factor_range
-                dose = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
-                noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
-            else:
-                noise_sigma = 0.0
-                dose = 1.0
-                noise_eff = 0.0
-            self._deg_params = {
-                'sigma': float(blur_sigma),
-                'kernel': int(blur_k),
-                'noise_sigma': float(noise_sigma),
-                'dose': float(dose),
-                'noise_eff': float(noise_eff),
-            }
-            # public alias for evaluator JSON logging
-            self.deg_params = dict(self._deg_params)
+            # initial sample for epoch 0 based on base seed + patient
+            self.resample_volume_params(epoch_seed=0)
         print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | norm=global_HU_clip={self.hu_clip} | random_crop={self.do_random_crop}")
         print(f"[CT-Loader] Degradation='{self.degradation}' | blur_sigma_range={self.blur_sigma_range} | blur_kernel={self.blur_kernel} | noise_sigma_range_norm={self.noise_sigma_range_norm} | dose_factor_range={self.dose_factor_range}")
         print(f"[CT-Loader] Degradation sampling mode='{self.degradation_sampling}' | deg_seed={self.deg_seed}")
+
+    def _seed_for_epoch(self, epoch_seed: int) -> int:
+        key = f"{int(self.deg_seed)}|{self.patient_id}|{int(epoch_seed)}"
+        h = hashlib.sha256(key.encode('utf-8')).hexdigest()
+        return int(h[:8], 16)  # 32-bit seed
+
+    def resample_volume_params(self, epoch_seed: int) -> None:
+        """Resample volume-wise degradation parameters deterministically per epoch.
+        Uses base deg_seed + patient_id + epoch_seed to draw new (sigma, kernel, noise, dose).
+        Effective only when degradation_sampling=='volume' and degradation in ('blur','blurnoise').
+        """
+        if not (self.degradation_sampling == 'volume' and self.degradation in ('blur', 'blurnoise')):
+            return
+        rng = np.random.default_rng(self._seed_for_epoch(epoch_seed))
+        # blur sigma and kernel
+        sig_lo, sig_hi = self.blur_sigma_range
+        blur_sigma = float(rng.uniform(sig_lo, sig_hi))
+        if self.blur_kernel is not None:
+            blur_k = int(self.blur_kernel)
+            if blur_k % 2 == 0:
+                blur_k += 1
+        else:
+            k = int(max(3, round(6.0 * float(blur_sigma))))
+            blur_k = k if (k % 2 == 1) else (k + 1)
+        # noise/dose if applicable
+        if self.degradation == 'blurnoise':
+            n_lo, n_hi = self.noise_sigma_range_norm
+            noise_sigma = float(rng.uniform(n_lo, n_hi))
+            d_lo, d_hi = self.dose_factor_range
+            dose = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
+            noise_eff = noise_sigma / max(1e-6, dose) ** 0.5
+        else:
+            noise_sigma = 0.0
+            dose = 1.0
+            noise_eff = 0.0
+        self._deg_params = {
+            'sigma': float(blur_sigma),
+            'kernel': int(blur_k),
+            'noise_sigma': float(noise_sigma),
+            'dose': float(dose),
+            'noise_eff': float(noise_eff),
+        }
+        # public alias used by evaluator
+        self.deg_params = dict(self._deg_params)
+        # ensure logging happens again on next __getitem__
+        self._deg_logged = False
+        print(f"[Deg-Resample] patient={self.patient_id} epoch_seed={epoch_seed} sigma={blur_sigma:.4f} k={blur_k} noise_sigma={noise_sigma:.5f} dose={dose:.3f} noise_eff={noise_eff:.5f}")
 
     def __len__(self):
         return len(self.paths)

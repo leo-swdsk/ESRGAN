@@ -290,11 +290,12 @@ def validate(G_ema: nn.Module, val_loader: DataLoader, device: torch.device) -> 
     G_ema.eval()
     metrics_accum = {k: 0.0 for k in ['MAE', 'MSE', 'RMSE', 'PSNR', 'SSIM']}
     n = 0
+    use_cuda = (device.type == 'cuda')
     with torch.no_grad():
         for lr, hr in val_loader:
             lr = lr.to(device, non_blocking=True)
             hr = hr.to(device, non_blocking=True)
-            with (torch_amp.autocast('cuda') if device.type == 'cuda' else nullcontext()):
+            with torch_amp.autocast('cuda', enabled=use_cuda):
                 sr = G_ema(lr)
             sr_cpu = sr.detach().cpu()
             hr_cpu = hr.detach().cpu()
@@ -349,7 +350,8 @@ def train_one_epoch(
         # -----------------
         if it > warmup_g_only_iters:
             optimizer_d.zero_grad(set_to_none=True)
-            with (torch_amp.autocast('cuda') if device.type == 'cuda' else nullcontext()):
+            use_cuda = (device.type == 'cuda')
+            with torch_amp.autocast('cuda', enabled=use_cuda):
                 with torch.no_grad():
                     sr = G(lr)
                 real_logits = D(hr)
@@ -365,7 +367,8 @@ def train_one_epoch(
         # Update Generator
         # -----------------
         optimizer_g.zero_grad(set_to_none=True)
-        with (torch_amp.autocast('cuda') if device.type == 'cuda' else nullcontext()):
+        use_cuda = (device.type == 'cuda')
+        with torch_amp.autocast('cuda', enabled=use_cuda):
             sr = G(lr)
             l_pix = l1(sr, hr)
             l_perc = perceptual_loss(sr, hr)
@@ -541,7 +544,8 @@ def main():
     print("[Config] dose_factor_range=", args.dose_factor_range)
     print("[Config] antialias_clean=", args.antialias_clean)
 
-    scaler = torch_amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
+    use_cuda = (device.type == 'cuda')
+    scaler = torch_amp.GradScaler(enabled=use_cuda)
 
     history = {'train_total': [], 'val_psnr': [], 'val_mae': []}
     exp_name = f"rrdb_x{args.scale}_{args.degradation}"

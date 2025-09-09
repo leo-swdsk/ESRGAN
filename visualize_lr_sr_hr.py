@@ -320,12 +320,10 @@ def build_sr_volume_from_lr(lr_volume, model, batch_size: int = 8):
 	slices = lr_volume.shape[0]
 	outs = []
 	with torch.no_grad():
+		use_cuda = (device.type == 'cuda')
 		for i in range(0, slices, max(1, batch_size)):
 			batch = lr_volume[i:i+batch_size]  # [B,1,h,w]
-			if device.type == 'cuda':
-				with torch.amp.autocast('cuda'):
-					y = model(batch.to(device))  # [B,1,H,W]
-			else:
+			with torch.amp.autocast('cuda', enabled=use_cuda):
 				y = model(batch.to(device))  # [B,1,H,W]
 			outs.append(y.cpu())
 	return torch.cat(outs, dim=0)  # [D,1,H,W]
@@ -498,10 +496,8 @@ class ViewerLRSRHR:
             if idx not in self._sr_cache:
                 x = self.lr[idx:idx+1].to(self.device)
                 with torch.no_grad():
-                    if self.device.type == 'cuda':
-                        with torch.amp.autocast('cuda'):
-                            y = self.model(x).detach()
-                    else:
+                    use_cuda = (self.device.type == 'cuda')
+                    with torch.amp.autocast('cuda', enabled=use_cuda):
                         y = self.model(x).detach()
                 self._sr_cache[idx] = y.cpu()[0,0]
             return self._sr_cache[idx]

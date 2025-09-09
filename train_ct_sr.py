@@ -16,11 +16,12 @@ from torch import amp
 def validate(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
+    use_cuda = (device.type == 'cuda')
     with torch.no_grad():
         for lr_imgs, hr_imgs in dataloader:
             lr_imgs = lr_imgs.to(device, non_blocking=True) # Pytorch kann Transfer asynchron starten-->während die GPU noch rechnet, kann schon der nächste Batch kopiert werde 
             hr_imgs = hr_imgs.to(device, non_blocking=True)
-            with amp.autocast('cuda'): #Tensor Cores rechnen in float16
+            with amp.autocast('cuda', enabled=use_cuda): #Tensor Cores rechnen in float16
                 preds = model(lr_imgs)
                 loss = criterion(preds, hr_imgs)
             total_loss += loss.item()
@@ -36,13 +37,25 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr) # Betas: 0.9, 0.999 (voreingestellter Standard)
     criterion = nn.L1Loss()  
+    use_cuda = (device.type == 'cuda')
 
     best_val = float("inf")
     epochs_no_improve = 0
     train_losses, val_losses = [], []
 
-    scaler = amp.GradScaler('cuda')
+    scaler = amp.GradScaler(enabled=use_cuda)
     for epoch in range(num_epochs):
+        # Resample degradation params for all training sub-datasets (ConcatDataset)
+        subdatasets = getattr(train_loader.dataset, "datasets", None)
+        if subdatasets is not None:
+            for ds in subdatasets:
+                if hasattr(ds, "resample_volume_params"):
+                    ds.resample_volume_params(epoch_seed=epoch)
+            print(f"[Deg-Resample] Training volumes resampled for epoch {epoch}")
+        else:
+            if hasattr(train_loader.dataset, "resample_volume_params"):
+                train_loader.dataset.resample_volume_params(epoch_seed=epoch)
+                print(f"[Deg-Resample] Training volumes resampled for epoch {epoch}")
         model.train()
         total_train = 0.0
         for batch_idx, (lr_imgs, hr_imgs) in enumerate(train_loader, start=1):
@@ -50,7 +63,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
             hr_imgs = hr_imgs.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True) # Gradienten nicht 0, sondern None -> weniger Speicherzugriffe
-            with amp.autocast('cuda'):
+            with amp.autocast('cuda', enabled=use_cuda):
                 preds = model(lr_imgs)
                 loss = criterion(preds, hr_imgs)
 
@@ -190,6 +203,12 @@ if __name__ == "__main__":
             antialias_clean=args.antialias_clean
         ) for d in train_dirs
     ])
+    # Validation/Test datasets with deterministic per-patient seeds (fixed across epochs)
+    def _fixed_seed_for_path(path: str, base: int = 42) -> int:
+        import hashlib
+        h = hashlib.sha256((str(base) + '|' + os.path.normpath(path)).encode('utf-8')).hexdigest()
+        return int(h[:8], 16)
+
     val_ds   = ConcatDataset([
         CT_Dataset_SR(
             d,
@@ -201,14 +220,38 @@ if __name__ == "__main__":
             blur_kernel=args.blur_kernel,
             noise_sigma_range_norm=tuple(args.noise_sigma_range_norm),
             dose_factor_range=tuple(args.dose_factor_range),
-            antialias_clean=args.antialias_clean
+            antialias_clean=args.antialias_clean,
+            degradation_sampling='volume',
+            deg_seed=_fixed_seed_for_path(d, base=42)
         ) for d in val_dirs
     ])
-    test_ds  = ConcatDataset([CT_Dataset_SR(d, scale_factor=args.scale, do_random_crop=False, hu_clip=(-1000, 2000)) for d in test_dirs])
+    test_ds  = ConcatDataset([
+        CT_Dataset_SR(
+            d,
+            scale_factor=args.scale,
+            do_random_crop=False,
+            hu_clip=(-1000, 2000),
+            degradation=args.degradation,
+            blur_sigma_range=args.blur_sigma_range,
+            blur_kernel=args.blur_kernel,
+            noise_sigma_range_norm=tuple(args.noise_sigma_range_norm),
+            dose_factor_range=tuple(args.dose_factor_range),
+            antialias_clean=args.antialias_clean,
+            degradation_sampling='volume',
+            deg_seed=_fixed_seed_for_path(d, base=1337)
+        ) for d in test_dirs
+    ])
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True, persistent_workers=True if args.num_workers > 0 else False)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=False  # wichtig für per-epoch Resampling
+    )
     val_loader   = DataLoader(val_ds,   batch_size=1, shuffle=False, num_workers=max(1, args.num_workers//2))
     test_loader  = DataLoader(test_ds,  batch_size=1, shuffle=False, num_workers=max(1, args.num_workers//2))
 
