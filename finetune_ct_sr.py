@@ -18,8 +18,13 @@ hallucinated details.
 """
 
 import os
+import sys
+import time
+import csv
+from datetime import datetime
 import json
 import math
+import hashlib
 import argparse
 from typing import Tuple, Dict
 
@@ -37,7 +42,23 @@ from contextlib import nullcontext
 from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
 from evaluate_ct_model import split_patients, get_patient_dirs
+from seed_utils import fixed_seed_for_path
 from ct_sr_evaluation import evaluate_metrics
+def _ensure_dir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+
+class _Tee:
+    def __init__(self, log_path: str):
+        self._stdout = sys.stdout
+        self._fh = open(log_path, 'a', encoding='utf-8', buffering=1)
+    def write(self, data: str) -> None:
+        self._stdout.write(data)
+        self._fh.write(data)
+    def flush(self) -> None:
+        self._stdout.flush()
+        self._fh.flush()
+
 
 
 # -----------------------------
@@ -241,11 +262,8 @@ def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, n
         ) for d in train_dirs
     ])
 
-    # Deterministic seeds per validation patient for reproducibility
-    import hashlib
-    def _fixed_seed_for_path(path: str, base: int = 42) -> int:
-        h = hashlib.sha256((str(base) + '|' + os.path.normpath(path)).encode('utf-8')).hexdigest()
-        return int(h[:8], 16)
+    
+
 
     val_ds = ConcatDataset([
         CT_Dataset_SR(
@@ -259,7 +277,7 @@ def build_dataloaders(root: str, scale: int, batch_size: int, patch_size: int, n
             dose_factor_range=tuple(dose_factor_range),
             antialias_clean=antialias_clean,
             degradation_sampling='volume',
-            deg_seed=_fixed_seed_for_path(d, base=42)
+            deg_seed=fixed_seed_for_path(d, base=42) # Deterministic seeds per validation patient for reproducibility
         ) for d in val_dirs
     ])
 
@@ -295,35 +313,71 @@ def build_models(scale: int, pretrained_g: str = None, device: torch.device = to
 # -----------------------------
 # Train / Validate
 # -----------------------------
-def validate(G_ema: nn.Module, val_loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def validate(G_ema: nn.Module, val_loader: DataLoader, device: torch.device, *,
+             perceptual_loss: 'PerceptualLoss', ragan: 'RaGANLoss', D: nn.Module = None,
+             lambda_pix: float = 1.0, lambda_perc: float = 0.10, lambda_gan: float = 0.005,
+             compute_gan: bool = False) -> Dict[str, float]:
     G_ema.eval()
-    metrics_accum = {k: 0.0 for k in ['MAE', 'MSE', 'RMSE', 'PSNR', 'SSIM']}
+    if D is not None:
+        D.eval()
     n = 0
+    # accumulators
+    val_l1 = 0.0
+    val_perc = 0.0
+    val_gan = 0.0
+    metrics_accum = {k: 0.0 for k in ['MAE', 'MSE', 'RMSE', 'PSNR', 'SSIM']}
     use_cuda = (device.type == 'cuda')
+    l1 = nn.L1Loss()
     with torch.no_grad():
         for lr, hr in val_loader:
             lr = lr.to(device, non_blocking=True)
             hr = hr.to(device, non_blocking=True)
             with torch_amp.autocast('cuda', enabled=use_cuda):
                 sr = G_ema(lr)
-            sr_cpu = sr.detach().cpu()
-            hr_cpu = hr.detach().cpu()
-            # Support batched evaluation by iterating per-sample
-            if sr_cpu.ndim == 4:
-                batch = sr_cpu.shape[0]
+                lpix = l1(sr, hr).item()
+                lperc = perceptual_loss(sr, hr).item()
+                if compute_gan and (D is not None):
+                    real_logits = D(hr)
+                    fake_logits = D(sr)
+                    lgan = ragan.g_loss(real_logits, fake_logits).item()
+                else:
+                    lgan = 0.0
+            val_l1 += float(lpix)
+            val_perc += float(lperc)
+            val_gan += float(lgan)
+
+            device_str = 'cuda' if use_cuda else 'cpu'
+            if sr.ndim == 4:
+                batch = sr.shape[0]
                 for i in range(batch):
-                    m = evaluate_metrics(sr_cpu[i], hr_cpu[i])
+                    m = evaluate_metrics(sr[i].detach(), hr[i].detach(), metrics_device=device_str)
                     for k in metrics_accum:
                         metrics_accum[k] += float(m[k])
                 n += batch
             else:
-                m = evaluate_metrics(sr_cpu, hr_cpu)
+                m = evaluate_metrics(sr.detach(), hr.detach(), metrics_device=device_str)
                 for k in metrics_accum:
                     metrics_accum[k] += float(m[k])
                 n += 1
+
+    inv_n = 1.0 / max(1, n)
     for k in metrics_accum:
-        metrics_accum[k] /= max(1, n)
-    return metrics_accum
+        metrics_accum[k] *= inv_n
+    val_l1 *= inv_n
+    val_perc *= inv_n
+    val_gan *= inv_n
+    val_total = lambda_pix * val_l1 + lambda_perc * val_perc + lambda_gan * val_gan
+    return {
+        'L1': val_l1,
+        'Perceptual': val_perc,
+        'GAN': val_gan,
+        'Total': val_total,
+        'MAE': metrics_accum['MAE'],
+        'MSE': metrics_accum['MSE'],
+        'RMSE': metrics_accum['RMSE'],
+        'PSNR': metrics_accum['PSNR'],
+        'SSIM': metrics_accum['SSIM'],
+    }
 
 
 def train_one_epoch(
@@ -342,11 +396,14 @@ def train_one_epoch(
     lambda_gan: float = 0.005,
     log_interval: int = 100,
     warmup_g_only_iters: int = 0,
-) -> float:
+) -> Dict[str, float]:
     G.train()
     D.train()
     l1 = nn.L1Loss()
     running_total = 0.0
+    running_l1 = 0.0
+    running_perc = 0.0
+    running_gan = 0.0
     it = 0
 
     for lr, hr in train_loader:
@@ -395,6 +452,9 @@ def train_one_epoch(
         ema.update(G)
 
         running_total += float(total.detach().cpu())
+        running_l1 += float(l_pix.detach().cpu())
+        running_perc += float(l_perc.detach().cpu())
+        running_gan += float(l_gan.detach().cpu())
 
         if it % log_interval == 0:
             d_real = torch.sigmoid(real_logits.detach()).mean().item() if it > warmup_g_only_iters else 0.0
@@ -406,9 +466,17 @@ def train_one_epoch(
         del sr, l_pix, l_perc, l_gan, total, fake_logits
         if 'real_logits' in locals():
             del real_logits
+
+    if device.type == 'cuda':
         torch.cuda.empty_cache()
 
-    return running_total / max(1, it)
+    inv = 1.0 / max(1, it)
+    return {
+        'total': running_total * inv,
+        'l1': running_l1 * inv,
+        'perc': running_perc * inv,
+        'gan': running_gan * inv,
+    }
 
 
 # -----------------------------
@@ -427,7 +495,9 @@ def save_checkpoint(out_dir: str,
                     global_step: int,
                     tag: str,
                     *, metadata: dict = None,
-                    ema_decay: float = 0.999):
+                    ema_decay: float = 0.999,
+                    best_psnr: float = None,
+                    best_mae: float = None):
     """Save checkpoint with complete training state (EMA/live, G/D, optimizers, schedulers, scaler)."""
     os.makedirs(out_dir, exist_ok=True)
 
@@ -442,7 +512,9 @@ def save_checkpoint(out_dir: str,
         'scheduler_g': scheduler_g.state_dict() if scheduler_g is not None else None,
         'scheduler_d': scheduler_d.state_dict() if scheduler_d is not None else None,
         'ema_decay': float(ema_decay),
-        'meta': metadata
+        'meta': metadata,
+        'best_psnr': float(best_psnr) if best_psnr is not None else None,
+        'best_mae': float(best_mae) if best_mae is not None else None,
     }
     payload_ema = {
         **payload_common,
@@ -466,31 +538,39 @@ def save_checkpoint(out_dir: str,
 
 def plot_curves(history: Dict[str, list], out_dir: str):
     os.makedirs(out_dir, exist_ok=True)
-    # Loss curve
+    # Total loss curves
     try:
-        plt.figure(figsize=(7,4))
-        plt.plot(history['train_total'], label='Train total loss')
+        plt.figure(figsize=(8,5))
+        if 'train_total' in history:
+            plt.plot(history['train_total'], label='Train Total')
+        if 'val_total' in history:
+            plt.plot(history['val_total'], label='Val Total')
         plt.xlabel('Epoch')
-        plt.ylabel('Loss')
+        plt.ylabel('Total Loss')
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, 'training_curve.png'), dpi=150)
+        plt.savefig(os.path.join(out_dir, 'loss_total.png'), dpi=150)
         plt.close()
     except Exception as e:
-        print(f"[Plot] Could not save training_curve.png: {e}")
+        print(f"[Plot] Could not save loss_total.png: {e}")
 
-    # PSNR curve
+    # Components curves
     try:
-        plt.figure(figsize=(7,4))
-        plt.plot(history['val_psnr'], label='Val PSNR')
+        plt.figure(figsize=(10,6))
+        for key, label in [
+            ('train_l1','Train L1'), ('train_perc','Train Perceptual'), ('train_gan','Train GAN'),
+            ('val_l1','Val L1'), ('val_perc','Val Perceptual'), ('val_gan','Val GAN')
+        ]:
+            if key in history and len(history[key]) > 0:
+                plt.plot(history[key], label=label)
         plt.xlabel('Epoch')
-        plt.ylabel('PSNR')
+        plt.ylabel('Loss Components')
         plt.legend()
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, 'val_psnr_curve.png'), dpi=150)
+        plt.savefig(os.path.join(out_dir, 'loss_components.png'), dpi=150)
         plt.close()
     except Exception as e:
-        print(f"[Plot] Could not save val_psnr_curve.png: {e}")
+        print(f"[Plot] Could not save loss_components.png: {e}")
 
 
 # -----------------------------
@@ -498,13 +578,13 @@ def plot_curves(history: Dict[str, list], out_dir: str):
 # -----------------------------
 def main():
     parser = argparse.ArgumentParser(description='Finetune RRDB on CT with ESRGAN objectives (conservative)')
-    parser.add_argument('--data_root', type=str, required=True)
+    parser.add_argument('--data_root', type=str, default='preprocessed_data', help='Root with patient subfolders (default: ESRGAN/preprocessed_data)')
     parser.add_argument('--scale', type=int, default=2, choices=[2,4])
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--patch', type=int, default=192)
-    parser.add_argument('--pretrained_g', type=str, default='rrdb_x2_blurnoise_best.pth')
-    parser.add_argument('--out_dir', type=str, default='finetune_outputs')
+    parser.add_argument('--pretrained_g', type=str, default='runs/rrdb_x2_blurnoise_20250909-145857/best.pth')
+    # removed out_dir (not used for new artifacts)
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint (ema/live) to resume training')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--lambda_perc', type=float, default=0.10)
@@ -538,6 +618,14 @@ def main():
         antialias_clean=args.antialias_clean
     )
 
+    # Runs folder & tee logger
+    exp_name = f"finetune_x{args.scale}_{args.degradation}"
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    run_dir = os.path.join('runs', f"{exp_name}_{timestamp}")
+    _ensure_dir(run_dir)
+    log_path = os.path.join(run_dir, 'train.log')
+    sys.stdout = _Tee(log_path)
+
     # Models
     G, D, ema = build_models(scale=args.scale, pretrained_g=args.pretrained_g, device=device)
     perceptual = PerceptualLoss(layer='conv5_4').to(device)
@@ -557,7 +645,6 @@ def main():
     print("[Config] batch_size=", args.batch_size)
     print("[Config] patch=", args.patch)
     print("[Config] pretrained_g=", args.pretrained_g)
-    print("[Config] out_dir=", args.out_dir)
     print("[Config] lr=", args.lr)
     print("[Config] lambda_perc=", args.lambda_perc)
     print("[Config] lambda_gan=", args.lambda_gan)
@@ -576,7 +663,11 @@ def main():
     use_cuda = (device.type == 'cuda')
     scaler = torch_amp.GradScaler(enabled=use_cuda)
 
-    history = {'train_total': [], 'val_psnr': [], 'val_mae': []}
+    history = {
+        'train_total': [], 'train_l1': [], 'train_perc': [], 'train_gan': [],
+        'val_total': [], 'val_l1': [], 'val_perc': [], 'val_gan': [],
+        'val_psnr': [], 'val_mae': []
+    }
     exp_name = f"rrdb_x{args.scale}_{args.degradation}"
     meta = {
         'experiment': exp_name,
@@ -588,16 +679,76 @@ def main():
         'dose_factor_range': args.dose_factor_range,
         'notes': 'blur/noise degrader, jitter per patch (finetune)'
     }
-    # write metadata JSON
+    # Effective defaults for blur sigma/kernel
+    if args.degradation in ('blur','blurnoise'):
+        if args.blur_sigma_range is None:
+            base_sigma = 0.8 if int(args.scale) == 2 else (1.2 if int(args.scale) == 4 else 0.8)
+            jitter = 0.1 if int(args.scale) == 2 else 0.15
+            eff_lo = max(1e-6, base_sigma - jitter)
+            eff_hi = base_sigma + jitter
+        else:
+            eff_lo = float(args.blur_sigma_range[0])
+            eff_hi = float(args.blur_sigma_range[1])
+        blur_sigma_range_eff = [eff_lo, eff_hi]
+        if args.blur_kernel is not None:
+            blur_kernel_eff = int(args.blur_kernel)
+        else:
+            mid_sigma = 0.5 * (eff_lo + eff_hi)
+            k = int(max(3, round(6.0 * float(mid_sigma))))
+            blur_kernel_eff = k if (k % 2 == 1) else (k + 1)
+    else:
+        blur_sigma_range_eff = None
+        blur_kernel_eff = None
+
+    # write metadata JSON to run_dir
     try:
-        with open(f"{exp_name}.json", 'w') as f:
-            json.dump(meta, f, indent=2)
-        print(f"[Meta] Wrote experiment metadata JSON -> {exp_name}.json")
+        cfg = {
+            'experiment': exp_name,
+            'run_dir': run_dir,
+            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+            'amp_enabled': bool(use_cuda),
+            'optimizer_G': {'name': 'Adam', 'lr': args.lr, 'betas': [0.9, 0.999]},
+            'optimizer_D': {'name': 'Adam', 'lr': args.lr, 'betas': [0.9, 0.999]},
+            'scheduler': {'type': 'MultiStepLR', 'milestones': milestones, 'gamma': 0.5},
+            'scale_factor': args.scale,
+            'patch': args.patch,
+            'batch_size': args.batch_size,
+            'num_workers': args.num_workers,
+            'warmup_g_only': args.warmup_g_only,
+            'lambda_perc': args.lambda_perc,
+            'lambda_gan': args.lambda_gan,
+            'degradation': args.degradation,
+            'blur_sigma_range': blur_sigma_range_eff,
+            'blur_kernel': blur_kernel_eff,
+            'noise_sigma_range_norm': args.noise_sigma_range_norm,
+            'dose_factor_range': args.dose_factor_range,
+            'degradation_sampling': {
+                'train': 'volume (per-epoch resample)',
+                'val': 'volume (fixed per patient)'
+            },
+            'splits': {
+                'n_train_vols': len(train_loader.dataset.datasets) if isinstance(train_loader.dataset, ConcatDataset) else -1,
+                'n_val_vols': len(val_loader.dataset.datasets) if isinstance(val_loader.dataset, ConcatDataset) else -1
+            },
+            'notes': 'ESRGAN finetune with EMA',
+        }
+        if args.resume:
+            cfg['resume_path'] = args.resume
+        with open(os.path.join(run_dir, 'config.json'), 'w') as f:
+            json.dump(cfg, f, indent=2)
+        print(f"[Meta] Wrote config -> {os.path.join(run_dir, 'config.json')}")
     except Exception as e:
-        print(f"[Meta] Could not write metadata JSON: {e}")
+        print(f"[Meta] Could not write config: {e}")
     best_psnr = -1e9
     best_mae = 1e9
     epochs_no_improve = 0
+
+    # CSV metrics in run_dir
+    csv_path = os.path.join(run_dir, 'metrics.csv')
+    if not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch','global_step','train_total','train_l1','train_perc','train_gan','val_total','val_l1','val_perc','val_gan','psnr','mae','lr','time_sec'])
 
     # Resume training if provided
     start_epoch = 1
@@ -657,13 +808,17 @@ def main():
             if hasattr(train_loader.dataset, 'resample_volume_params'):
                 train_loader.dataset.resample_volume_params(epoch_seed=epoch)
                 print(f"[Deg-Resample] Training volumes resampled for epoch {epoch}")
+        t0 = time.perf_counter()
         warmup_iters_remaining = max(0, args.warmup_g_only - iters_seen)
-        avg_train_total = train_one_epoch(
+        train_out = train_one_epoch(
             G, D, ema, train_loader, optimizer_g, optimizer_d, scaler, perceptual, ragan, device,
             lambda_pix=1.0, lambda_perc=args.lambda_perc, lambda_gan=args.lambda_gan,
             log_interval=100, warmup_g_only_iters=warmup_iters_remaining
         )
-        history['train_total'].append(avg_train_total)
+        history['train_total'].append(train_out['total'])
+        history['train_l1'].append(train_out['l1'])
+        history['train_perc'].append(train_out['perc'])
+        history['train_gan'].append(train_out['gan'])
 
         # We can estimate how many iters happened
         iters_seen += len(train_loader)
@@ -673,10 +828,31 @@ def main():
         scheduler_d.step()
 
         # Validation using EMA
-        val_metrics = validate(ema.ema_model, val_loader, device)
+        val_metrics = validate(ema.ema_model, val_loader, device,
+                               perceptual_loss=perceptual, ragan=ragan, D=D,
+                               lambda_pix=1.0, lambda_perc=args.lambda_perc, lambda_gan=args.lambda_gan,
+                               compute_gan=False)
+        history['val_total'].append(val_metrics['Total'])
+        history['val_l1'].append(val_metrics['L1'])
+        history['val_perc'].append(val_metrics['Perceptual'])
+        history['val_gan'].append(val_metrics['GAN'])
         history['val_psnr'].append(val_metrics['PSNR'])
         history['val_mae'].append(val_metrics['MAE'])
-        print(f"[Val] MAE={val_metrics['MAE']:.6f} MSE={val_metrics['MSE']:.6f} RMSE={val_metrics['RMSE']:.6f} PSNR={val_metrics['PSNR']:.4f} SSIM={val_metrics['SSIM']:.4f}")
+        print(f"[Val] Total={val_metrics['Total']:.6f} | L1={val_metrics['L1']:.6f} Perc={val_metrics['Perceptual']:.6f} GAN={val_metrics['GAN']:.6f} | PSNR={val_metrics['PSNR']:.4f} SSIM={val_metrics['SSIM']:.4f}")
+
+        elapsed = time.perf_counter() - t0
+        current_lr = optimizer_g.param_groups[0]['lr']
+        try:
+            with open(csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    epoch, iters_seen,
+                    f"{train_out['total']:.6f}", f"{train_out['l1']:.6f}", f"{train_out['perc']:.6f}", f"{train_out['gan']:.6f}",
+                    f"{val_metrics['Total']:.6f}", f"{val_metrics['L1']:.6f}", f"{val_metrics['Perceptual']:.6f}", f"{val_metrics['GAN']:.6f}",
+                    f"{val_metrics['PSNR']:.4f}", f"{val_metrics['MAE']:.6f}", f"{current_lr:.6f}", f"{elapsed:.2f}"
+                ])
+        except Exception as e:
+            print(f"[CSV] Could not append metrics: {e}")
 
         # Checkpoints
         improved = False
@@ -686,20 +862,23 @@ def main():
         if val_metrics['MAE'] < best_mae - 1e-6:
             best_mae = val_metrics['MAE']
             improved = True
+        ckpt_dir = run_dir
         if improved:
             save_checkpoint(
-                args.out_dir, ema.ema_model, G, D,
+                ckpt_dir, ema.ema_model, G, D,
                 optimizer_g, optimizer_d, scaler,
                 scheduler_g, scheduler_d,
                 epoch, iters_seen,
-                tag='best', metadata=meta, ema_decay=ema.decay
+                tag='best', metadata=meta, ema_decay=ema.decay,
+                best_psnr=best_psnr, best_mae=best_mae
             )
         save_checkpoint(
-            args.out_dir, ema.ema_model, G, D,
+            ckpt_dir, ema.ema_model, G, D,
             optimizer_g, optimizer_d, scaler,
             scheduler_g, scheduler_d,
             epoch, iters_seen,
-            tag='last', metadata=meta, ema_decay=ema.decay
+            tag='last', metadata=meta, ema_decay=ema.decay,
+            best_psnr=best_psnr, best_mae=best_mae
         )
 
         # Early stopping on selected metric
@@ -718,7 +897,7 @@ def main():
                     break
 
     # Plots
-    plot_curves(history, args.out_dir)
+    plot_curves(history, run_dir)
 
 
 if __name__ == '__main__':

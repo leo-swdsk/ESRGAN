@@ -9,6 +9,7 @@ from collections import defaultdict
 import torch
 
 from rrdb_ct_model import RRDBNet_CT
+from seed_utils import fixed_seed_for_path
 from ct_dataset_loader import CT_Dataset_SR
 from ct_sr_evaluation import compare_methods
 
@@ -52,7 +53,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                    max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
                    degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
                    noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
-                   degradation_sampling='volume', deg_seed=42):
+                   degradation_sampling='volume', deg_seed=42, deg_seed_mode='per_patient'):
     ensure_dir(output_dir)
 
     # Persist complete evaluation configuration for reproducibility
@@ -82,6 +83,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         'antialias_clean': antialias_clean,
         'degradation_sampling': degradation_sampling,
         'deg_seed': deg_seed,
+        'deg_seed_mode': deg_seed_mode,
     }
 
     # Prepare model
@@ -126,7 +128,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}__{metrics_tag}{suffix}.json")
 
     # Collect per-slice metrics and per-patient aggregations
-    fieldnames = ['patient_id', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']
+    fieldnames = ['patient_id', 'deg_seed', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']
     rows = []
     patient_to_method_metrics = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
@@ -137,10 +139,18 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     else:
         print(f"[Eval] Metrics mode: window | preset={preset} | WL/WW=({window_center},{window_width})")
     print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={blur_sigma_range} | blur_kernel={blur_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
-    print(f"[Eval] Degradation sampling='{degradation_sampling}' | deg_seed={deg_seed}")
+    print(f"[Eval] Degradation sampling='{degradation_sampling}' | deg_seed_mode={deg_seed_mode} | base_seed={deg_seed}")
+
+    # helper for per-patient deterministic seed
+    patient_to_used_seed = {}
     with torch.no_grad():
         for p_idx, patient_dir in enumerate(patient_dirs):
             patient_id = os.path.basename(patient_dir)
+
+            # determine deterministic seed per patient (mode)
+            used_seed = int(deg_seed) if str(deg_seed_mode) == 'global' else fixed_seed_for_path(patient_dir, int(deg_seed))
+            patient_to_used_seed[patient_id] = used_seed
+            print(f"[Eval] patient={patient_id} | used_deg_seed={used_seed}")
 
             # Full-slice dataset for evaluation (no random crop) with consistent degradation
             ds = CT_Dataset_SR(
@@ -156,7 +166,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 antialias_clean=antialias_clean,
                 reverse_order=True,
                 degradation_sampling=degradation_sampling,
-                deg_seed=int(deg_seed)
+                deg_seed=used_seed
             )
             # Record effective degradation configuration (ranges and sampled values if available)
             eff_blur_range = tuple(blur_sigma_range) if blur_sigma_range is not None else _default_blur_sigma_range_for_scale(scale)
@@ -291,6 +301,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             'json': json_path
         },
         'config': eval_config,
+        'deg_seeds_per_patient': patient_to_used_seed,
         'global_per_slice': global_summary,
         'per_patient': per_patient_summary,
         'patient_level_aggregate': patient_level_agg
@@ -342,6 +353,7 @@ def main():
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     parser.add_argument('--degradation_sampling', type=str, default='volume', choices=['volume','slice','det-slice'], help='Degradation sampling mode (volume|slice|det-slice)')
     parser.add_argument('--deg_seed', type=int, default=42, help='Seed for degradation sampling (volume or det-slice)')
+    parser.add_argument('--deg_seed_mode', type=str, default='per_patient', choices=['global','per_patient'], help='How to derive degradation seed per patient (global same for all, per_patient hashed per path)')
     args = parser.parse_args()
 
     # Echo CLI config
@@ -391,6 +403,7 @@ def main():
         antialias_clean=args.antialias_clean
         ,degradation_sampling=args.degradation_sampling
         ,deg_seed=args.deg_seed
+        ,deg_seed_mode=args.deg_seed_mode
     )
 
 

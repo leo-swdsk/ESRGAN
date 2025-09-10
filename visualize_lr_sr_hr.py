@@ -9,6 +9,7 @@ import math
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 
 from window_presets import WINDOW_PRESETS
+from seed_utils import fixed_seed_for_path
 from ct_dataset_loader import is_ct_image_dicom
 from rrdb_ct_model import RRDBNet_CT
 from skimage.metrics import structural_similarity as ssim
@@ -1040,7 +1041,8 @@ def main():
     parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     parser.add_argument('--degradation_sampling', type=str, default='volume', choices=['volume','slice','det-slice'], help='Degradation sampling mode (volume|slice|det-slice) [viewer applies uniformly per volume]')
-    parser.add_argument('--deg_seed', type=int, default=42, help='Seed for degradation sampling in viewer')
+    parser.add_argument('--deg_seed_mode', type=str, default='per_patient', choices=['global','per_patient'], help='How to derive degradation seed (global fixed vs per_patient hashed by path)')
+    parser.add_argument('--deg_seed', type=int, default=42, help='Base seed for degradation sampling in viewer')
     args = parser.parse_args()
 
     # ---------- Modell ----------
@@ -1075,10 +1077,10 @@ def main():
     hr_norm_vol = hu_to_m11_global(hr_hu_vol, lo, hi)  # [-1,1]
 
     print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
-    print(f"[Vis] Degradation sampling='{args.degradation_sampling}' (viewer uses per-volume) | deg_seed={args.deg_seed}")
-    # For reproducibility in viewer, set numpy RNG with seed (per-volume sampling)
-    # Create a deterministic RNG for degradation sampling based on seed
-    rng_vis = np.random.default_rng(int(args.deg_seed))    # Create a deterministic RNG for degradation sampling based on seed
+    used_seed = int(args.deg_seed) if str(args.deg_seed_mode) == 'global' else fixed_seed_for_path(args.dicom_folder, int(args.deg_seed))
+    print(f"[Vis] Degradation sampling='{args.degradation_sampling}' (viewer uses per-volume) | deg_seed_mode={args.deg_seed_mode} | base_seed={args.deg_seed} | used_seed={used_seed}")
+    # RNG for degradation sampling (per-volume)
+    rng_vis = np.random.default_rng(int(used_seed))
     lr_vol, used_deg = build_lr_volume_from_hr(
         hr_norm_vol, scale=args.scale,
         degradation=args.degradation,
@@ -1146,7 +1148,7 @@ def main():
         dose_factor_range=args.dose_factor_range,
         antialias_clean=args.antialias_clean,
         degradation_sampling=args.degradation_sampling,
-        deg_seed=args.deg_seed,
+        deg_seed=used_seed,
     )
 
     print('Navigation: Mouse wheel or arrow keys to navigate slices')

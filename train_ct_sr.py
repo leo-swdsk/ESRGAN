@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
+from seed_utils import fixed_seed_for_path
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ import json
 import matplotlib.pyplot as plt
 from torch.utils.data import ConcatDataset
 from torch import amp
+import hashlib
 
 #AMP (Automatic Mixed Precision) wird genutzt --> Operationen laufen intern in float16 und nicht 32, was Speicher spart
 def validate(model, dataloader, criterion, device):
@@ -295,11 +297,7 @@ if __name__ == "__main__":
             antialias_clean=args.antialias_clean
         ) for d in train_dirs
     ])
-    # Validation/Test datasets with deterministic per-patient seeds (fixed across epochs)
-    def _fixed_seed_for_path(path: str, base: int = 42) -> int:
-        import hashlib
-        h = hashlib.sha256((str(base) + '|' + os.path.normpath(path)).encode('utf-8')).hexdigest()
-        return int(h[:8], 16)
+    
 
     val_ds   = ConcatDataset([
         CT_Dataset_SR(
@@ -314,7 +312,7 @@ if __name__ == "__main__":
             dose_factor_range=tuple(args.dose_factor_range),
             antialias_clean=args.antialias_clean,
             degradation_sampling='volume',
-            deg_seed=_fixed_seed_for_path(d, base=42)
+            deg_seed=fixed_seed_for_path(d, base=42) # Validation/Test datasets with deterministic per-patient seeds (fixed across epochs)
         ) for d in val_dirs
     ])
     test_ds  = ConcatDataset([
@@ -330,7 +328,7 @@ if __name__ == "__main__":
             dose_factor_range=tuple(args.dose_factor_range),
             antialias_clean=args.antialias_clean,
             degradation_sampling='volume',
-            deg_seed=_fixed_seed_for_path(d, base=1337)
+            deg_seed=fixed_seed_for_path(d, base=1337)
         ) for d in test_dirs
     ])
 
