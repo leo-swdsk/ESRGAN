@@ -1,5 +1,3 @@
-# load_ct_tensor.py
-
 import pydicom
 import numpy as np
 import torch

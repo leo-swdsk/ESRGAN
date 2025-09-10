@@ -1,5 +1,3 @@
-# downsample_tensor_volume.py
-
 import torch
 import torch.nn.functional as F
 

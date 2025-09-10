@@ -1,6 +1,4 @@
-# window_presets.py
-
-# Voreinstellungen für verschiedene CT-Gewebetypen
+# Presets for different CT tissue types
 WINDOW_PRESETS = {
     "soft_tissue": {"center": 40, "width": 400},
     "lung": {"center": -600, "width": 1500},

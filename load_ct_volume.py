@@ -1,5 +1,3 @@
-# load_ct_volume.py
-
 import os
 from load_ct_tensor import load_ct_as_tensor
 import torch
