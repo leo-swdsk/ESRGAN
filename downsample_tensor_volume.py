@@ -1,22 +1,21 @@
-import torch
 import torch.nn.functional as F
 
-def downsample_tensor(tensor, scale_factor=2):
+def downsample_tensor(tensor, scale_factor=2, antialias=True):
     """
-    Funktioniert für:
-    - Einzelne Slices: [1, H, W]
-    - Volumen: [N, 1, H, W]
+    Works for:
+    - Single slices: [1, H, W]
+    - Volume: [N, 1, H, W] (not used for now, but kept for future use (3D Superresolution))
     """
     if tensor.ndim == 3:
-        # Einzelbild: [1, H, W] → [1, 1, H, W]
+        # Single slice: [1, H, W] → [1, 1, H, W]
         tensor = tensor.unsqueeze(0)
-        downsampled = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False, antialias=True)
-        return downsampled.squeeze(0)  # zurück zu [1, H', W']
+        downsampled = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False, antialias=antialias)
+        return downsampled.squeeze(0)  # back to [1, H', W']
 
-    elif tensor.ndim == 4:
-        # Volumen: [N, 1, H, W]
-        downsampled = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False, antialias=True)
+    elif tensor.ndim == 4: # Volume
+        # Volume: [N, 1, H, W]
+        downsampled = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False, antialias=antialias)
         return downsampled  # [N, 1, H', W']
 
     else:
-        raise ValueError("Tensor muss [1,H,W] oder [N,1,H,W] sein")
+        raise ValueError("Tensor must be [1,H,W] or [N,1,H,W]")

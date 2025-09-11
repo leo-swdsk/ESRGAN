@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import ConcatDataset
 from torch import amp
 import hashlib
+import random
 
 #AMP (Automatic Mixed Precision) wird genutzt --> Operationen laufen intern in float16 und nicht 32, was Speicher spart
 def validate(model, dataloader, criterion, device):
@@ -120,7 +121,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
             lr_imgs = lr_imgs.to(device, non_blocking=True)
             hr_imgs = hr_imgs.to(device, non_blocking=True)
 
-            optimizer.zero_grad(set_to_none=True) # Gradienten nicht 0, sondern None -> weniger Speicherzugriffe
+            optimizer.zero_grad(set_to_none=True) # Gradienten not 0, but None -> less memory accesses
             with amp.autocast('cuda', enabled=use_cuda):
                 preds = model(lr_imgs)
                 loss = criterion(preds, hr_imgs)
@@ -133,7 +134,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
             global_step += 1
             if batch_idx % 50 == 0:
                 print(f"  [Batch {batch_idx}/{len(train_loader)}] train L1={loss.item():.5f}")
-            # (optional) Speicher aufräumen:
+            
             del preds, loss
         torch.cuda.empty_cache()
 
@@ -154,7 +155,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
         except Exception as e:
             print(f"[CSV] Could not append metrics: {e}")
 
-        # Early Stopping + Best speichern
+        # Early Stopping + save best
         if avg_val < best_val - 1e-6:
             best_val = avg_val
             epochs_no_improve = 0
@@ -177,7 +178,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
                 print(f"[Train] Early stopping. Best val: {best_val:.6f}")
                 break
 
-    # Letztes Modell speichern
+    # Save last model
     payload_last = {
         'epoch': start_epoch + len(train_losses),
         'global_step': global_step,
@@ -191,7 +192,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     torch.save(payload_last, ckpt_last)
     print(f"[CKPT] Saved last -> {ckpt_last}")
 
-    # Plot speichern
+    # Save plot
     try:
         plt.figure(figsize=(7,4))
         plt.plot(range(1, len(train_losses)+1), train_losses, label='Train loss (L1)')
@@ -209,10 +210,8 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     return model, train_losses, val_losses
 
 
-# Startpunkt
+# Startpoint
 if __name__ == "__main__":
-    # no global RNG seeding; use per-use np.random.default_rng
-
     parser = argparse.ArgumentParser(description='Train RRDBNet_CT on CT super-resolution with L1 loss (pretraining)')
     default_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'preprocessed_data')
     parser.add_argument('--data_root', type=str, default=default_root, help='Root with patient subfolders (default: ESRGAN/preprocessed_data)')
@@ -224,6 +223,7 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--num_workers', type=int, default=4, help='Dataloader workers for training')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
+    parser.add_argument('--seed', type=int, default=42, help='Global seed for reproducible runs')
     # Degradation options
     parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation')
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma (in normalized image units). If None, defaults by scale (x2≈0.8±0.1, x4≈1.2±0.15).')
@@ -232,6 +232,18 @@ if __name__ == "__main__":
     parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
     args = parser.parse_args()
+
+    # Global seeding for reproducibility (before splits/model/loader)
+    def set_global_seed(seed: int):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        try:
+            torch.cuda.manual_seed_all(seed)
+        except Exception:
+            pass
+
+    set_global_seed(int(args.seed))
 
     if args.patch_size % args.scale != 0:
         raise ValueError(f"patch_size ({args.patch_size}) must be divisible by scale ({args.scale})")
@@ -244,6 +256,10 @@ if __name__ == "__main__":
     # Tee logger
     log_path = os.path.join(run_dir, 'train.log')
     sys.stdout = _Tee(log_path)
+
+    # Brief reproducibility log
+    print(f"[Repro] seed={args.seed} | AMP={torch.cuda.is_available()}")
+    print("[Repro] Train DataLoader uses a seeded torch.Generator for shuffle")
 
     print("[Args] Training configuration:")
     print(f"  data_root   : {args.data_root}")
@@ -267,7 +283,7 @@ if __name__ == "__main__":
     if len(patient_dirs) == 0:
         raise RuntimeError(f"No patient directories found under {root}")
 
-    perm = np.random.default_rng(42).permutation(len(patient_dirs))
+    perm = np.random.default_rng(42).permutation(len(patient_dirs)) # deterministic permutation to ensure same split across runs
     patient_dirs = [patient_dirs[i] for i in perm]
     n = len(patient_dirs)
     # 70/15/15 patient-wise split using deterministic index cutoffs
@@ -279,9 +295,9 @@ if __name__ == "__main__":
 
     print(f"[Split] Patients total={n} | train={len(train_dirs)} | val={len(val_dirs)} | test={len(test_dirs)}")
 
-    # Datasets zusammenfassen
+    # Build datasets
     print("[Data] Building datasets ...")
-    # Train auf zufälligen, ausgerichteten Patches; Val/Test auf ganzen Slices
+    # Train on random, aligned patches; Val/Test on whole slices
     train_ds = ConcatDataset([
         CT_Dataset_SR(
             d,
@@ -334,18 +350,22 @@ if __name__ == "__main__":
 
     # DataLoader
     print("[Data] Creating dataloaders ...")
+    # Deterministic shuffle generator
+    g = torch.Generator()
+    g.manual_seed(int(args.seed))
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
+        generator=g,
         num_workers=args.num_workers,
         pin_memory=True,
-        persistent_workers=False  # wichtig für per-epoch Resampling
+        persistent_workers=False  # important for per-epoch Resampling
     )
     val_loader   = DataLoader(val_ds,   batch_size=1, shuffle=False, num_workers=max(1, args.num_workers//2))
     test_loader  = DataLoader(test_ds,  batch_size=1, shuffle=False, num_workers=max(1, args.num_workers//2))
 
-    # Modell initialisieren
+    # Initialize model
     print(f"[Init] Creating model RRDBNet_CT(scale={args.scale}) ...")
     model = RRDBNet_CT(scale=args.scale)
 
@@ -409,7 +429,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[Meta] Could not write metadata JSON: {e}")
 
-    # Training mit Early Stopping + Plot
+    # Training with Early Stopping + Plot
     trained_model, train_losses, val_losses = train_sr_model(
         model, train_loader, val_loader,
         num_epochs=args.epochs, lr=args.lr, patience=args.patience,
@@ -418,4 +438,3 @@ if __name__ == "__main__":
         metadata=meta
     )
 
-    # Bestes Modell ist in {best_path} gespeichert

@@ -8,6 +8,8 @@ from torch.utils.data import Dataset
 import numpy as np
 from typing import Literal
 from pydicom.pixel_data_handlers.util import apply_modality_lut
+from downsample_tensor_volume import downsample_tensor
+
 #WGanze Slices laden bringt meistens kaum einen Vorteil und füllt den Speicher unnötig, deshalb kleinere zufällige Patches
 def random_aligned_crop(hr_tensor, lr_tensor, hr_patch=128, scale=2):
     # hr_tensor: [1, H, W], lr_tensor: [1, H/2, W/2] bei scale=2
@@ -103,10 +105,7 @@ def load_dicom_as_tensor(path, hu_clip=(-1000, 2000)):
     tensor = torch.tensor(img).unsqueeze(0)  # [1, H, W]
     return tensor
 
-def downsample_tensor(tensor, scale_factor=2, *, antialias=True):
-    tensor = tensor.unsqueeze(0)  # [1, 1, H, W]
-    ds = F.interpolate(tensor, scale_factor=1/scale_factor, mode='bilinear', align_corners=False, antialias=antialias)
-    return ds.squeeze(0)  # [1, H/s, W/s]
+
 
 
 def _gaussian_kernel_2d(sigma: float, kernel_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
