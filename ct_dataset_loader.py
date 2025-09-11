@@ -180,6 +180,8 @@ class CT_Dataset_SR(Dataset):
         # per-volume deterministic degradation params
         self._deg_params = None
         self._deg_logged = False
+        # track current epoch for deterministic per-slice sampling (crops/noise)
+        self._current_epoch = 0
         if self.degradation_sampling == 'volume' and self.degradation in ('blur','blurnoise'):
             # initial sample for epoch 0 based on base seed + patient
             self.resample_volume_params(epoch_seed=0)
@@ -192,11 +194,22 @@ class CT_Dataset_SR(Dataset):
         h = hashlib.sha256(key.encode('utf-8')).hexdigest()
         return int(h[:8], 16)  # 32-bit seed
 
+    def _seed_for_item(self, epoch_seed: int, idx: int, kind: str) -> int:
+        """Deterministic per-slice seed derived from base deg_seed, patient id (lowercased), epoch, slice idx and a kind tag.
+        kind in {"crop","noise"}.
+        """
+        pid = str(self.patient_id).lower()
+        key = f"{int(self.deg_seed)}|{pid}|{int(epoch_seed)}|{int(idx)}|{str(kind)}"
+        h = hashlib.sha256(key.encode('utf-8')).hexdigest()
+        return int(h[:8], 16)
+
     def resample_volume_params(self, epoch_seed: int) -> None:
         """Resample volume-wise degradation parameters deterministically per epoch.
         Uses base deg_seed + patient_id + epoch_seed to draw new (sigma, kernel, noise, dose).
         Effective only when degradation_sampling=='volume' and degradation in ('blur','blurnoise').
         """
+        # remember current epoch for per-slice deterministic sampling (crops/noise)
+        self._current_epoch = int(epoch_seed)
         if not (self.degradation_sampling == 'volume' and self.degradation in ('blur', 'blurnoise')):
             return
         rng = np.random.default_rng(self._seed_for_epoch(epoch_seed))
@@ -245,7 +258,9 @@ class CT_Dataset_SR(Dataset):
             if H >= self.hr_patch and W >= self.hr_patch:
                 max_y = H - self.hr_patch
                 max_x = W - self.hr_patch
-                rng = np.random.default_rng()
+                # deterministic crop per slice and epoch
+                seed_crop = self._seed_for_item(getattr(self, "_current_epoch", 0), idx, "crop")
+                rng = np.random.default_rng(seed_crop)
                 y0 = int(rng.integers(0, max_y + 1)) if max_y > 0 else 0
                 x0 = int(rng.integers(0, max_x + 1)) if max_x > 0 else 0
                 hr = hr_full[:, y0:y0+self.hr_patch, x0:x0+self.hr_patch]
@@ -310,7 +325,10 @@ class CT_Dataset_SR(Dataset):
                 dose_used = float(rng.uniform(min(d_lo, d_hi), max(d_lo, d_hi)))
             noise_eff = float(noise_sigma_used) / max(1e-6, float(dose_used)) ** 0.5
             # Use numpy RNG for noise, then convert to torch tensor on same device/dtype
-            noise_np = np.random.default_rng().normal(loc=0.0, scale=noise_eff, size=lr.shape,)
+            # deterministic noise field per slice and epoch
+            seed_noise = self._seed_for_item(getattr(self, "_current_epoch", 0), idx, "noise")
+            rng_noise = np.random.default_rng(seed_noise)
+            noise_np = rng_noise.normal(loc=0.0, scale=noise_eff, size=lr.shape,)
             noise_t = torch.as_tensor(noise_np, device=lr.device, dtype=lr.dtype)
             lr = lr + noise_t
             lr = torch.clamp(lr, -1.0, 1.0)
@@ -323,16 +341,3 @@ class CT_Dataset_SR(Dataset):
             self._deg_logged = True
 
         return lr, hr
-
-
-# Selbst-test-Beispiel:
-if __name__ == "__main__":
-    dataset = CT_Dataset_SR(
-        #r"C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG", #Laptop
-        r"C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG", #RTX4080 Super
-        #max_slices=20  # wir nehmen erstmal nur 20 Slices
-    )
-    print(f"Anzahl Bilder: {len(dataset)}")
-    lr, hr = dataset[0]
-    print(f"LR-Shape: {lr.shape}, HR-Shape: {hr.shape}")
-
