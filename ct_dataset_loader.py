@@ -134,7 +134,7 @@ def _compute_kernel_size_from_sigma(sigma: float) -> int:
 
 class CT_Dataset_SR(Dataset):
     def __init__(self, dicom_folder, scale_factor=2, max_slices=None,
-                 do_random_crop=True, hr_patch=128, hu_clip=(-1000, 2000),
+                 do_random_crop=True, hr_patch=192, hu_clip=(-1000, 2000),
                  degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
                  noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
                  reverse_order=True,

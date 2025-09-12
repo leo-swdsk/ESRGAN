@@ -23,8 +23,6 @@ import time
 import csv
 from datetime import datetime
 import json
-import math
-import hashlib
 import argparse
 from typing import Tuple, Dict
 
@@ -37,7 +35,6 @@ from torchvision import models
 from torch.optim import Adam
 from torch.optim.lr_scheduler import MultiStepLR
 import matplotlib.pyplot as plt
-from contextlib import nullcontext
 
 from rrdb_ct_model import RRDBNet_CT
 from ct_dataset_loader import CT_Dataset_SR
@@ -95,39 +92,39 @@ class PatchDiscriminatorSN(nn.Module):
         super().__init__()
         nf = 64
         layers = [
-            # Schicht 1: 1 Kanal (HR-Bild) → 64 Kanäle, H×W bleibt gleich
+            # Layer 1: 1 Channel (HR-Image) → 64 Channels, H×W remains the same
             spectral_norm(nn.Conv2d(in_nc, nf, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 2: 64 Kanäle → 64 Kanäle, H×W wird halbiert (stride=2)
+            # Layer 2: 64 Channels → 64 Channels, H×W halved (stride=2)
             spectral_norm(nn.Conv2d(nf, nf, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 3: 64 Kanäle → 128 Kanäle, H×W bleibt halbiert
+            # Layer 3: 64 Channels → 128 Channels, H×W halved
             spectral_norm(nn.Conv2d(nf, nf * 2, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 4: 128 Kanäle → 128 Kanäle, H×W wird weiter halbiert (stride=2)
+            # Layer 4: 128 Channels → 128 Channels, H×W halved (stride=2)
             spectral_norm(nn.Conv2d(nf * 2, nf * 2, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 5: 128 Kanäle → 256 Kanäle, H×W bleibt weiter halbiert
+            # Layer 5: 128 Channels → 256 Channels, H×W halved
             spectral_norm(nn.Conv2d(nf * 2, nf * 4, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 6: 256 Kanäle → 256 Kanäle, H×W wird weiter halbiert (stride=2)
+            # Layer 6: 256 Channels → 256 Channels, H×W halved (stride=2)
             spectral_norm(nn.Conv2d(nf * 4, nf * 4, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 7: 256 Kanäle → 512 Kanäle, H×W bleibt weiter halbiert
+            # Layer 7: 256 Channels → 512 Channels, H×W halved
             spectral_norm(nn.Conv2d(nf * 4, nf * 8, 3, 1, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 8: 512 Kanäle → 512 Kanäle, H×W wird weiter halbiert (stride=2)
+            # Layer 8: 512 Channels → 512 Channels, H×W halved (stride=2)
             spectral_norm(nn.Conv2d(nf * 8, nf * 8, 3, 2, 1)),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # Schicht 9: 512 Kanäle → 1 Kanal (Logits), H×W bleibt weiter halbiert
+            # Layer 9: 512 Channels → 1 Channel (Logits), H×W stays halved
             spectral_norm(nn.Conv2d(nf * 8, 1, 3, 1, 1))  # Output: Logits-Matrix
         ]
         self.net = nn.Sequential(*layers)
@@ -198,7 +195,7 @@ class RaGANLoss:
     Implements relativistic average GAN losses for discriminator and generator.
     Works with patch-based logits maps.
     """
-    # Logit = roher, unnormalisierter Output vor der Sigmoid-Funktion
+    # Logit = raw, unnormalized output before the Sigmoid function
     def d_loss(self, real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
         real_mean = fake_logits.detach().mean()
         fake_mean = real_logits.detach().mean()
