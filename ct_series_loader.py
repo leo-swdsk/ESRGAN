@@ -6,15 +6,7 @@ from pydicom.pixel_data_handlers.util import apply_modality_lut
 
 from window_presets import WINDOW_PRESETS
 from ct_dataset_loader import is_ct_image_dicom
-
-
-def _apply_window_np(img, center, width):
-	min_val = center - width / 2.0
-	max_val = center + width / 2.0
-	img = np.clip(img.astype(np.float32), min_val, max_val)
-	img = (img - min_val) / (max_val - min_val)
-	img = img * 2.0 - 1.0
-	return img.astype(np.float32)
+from windowing import apply_window
 
 
 def _geometry_order_key(path: str):
@@ -75,11 +67,11 @@ def load_series_windowed(folder_path, preset="soft_tissue", override_window=None
 			arr = ds.pixel_array
 			hu = apply_modality_lut(arr, ds).astype(np.float32)
 			if hu.ndim == 2:
-				img = _apply_window_np(hu, wl, ww)
+				img = apply_window(hu, wl, ww)
 				slice_list.append(torch.tensor(img).unsqueeze(0))
 			elif hu.ndim == 3:
 				for k in range(hu.shape[0]):
-					img = _apply_window_np(hu[k], wl, ww)
+					img = apply_window(hu[k], wl, ww)
 					slice_list.append(torch.tensor(img).unsqueeze(0))
 		except Exception:
 			continue

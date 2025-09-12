@@ -9,41 +9,30 @@ import numpy as np
 from typing import Literal
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 from downsample_tensor_volume import downsample_tensor
+from windowing import apply_window
 
-#WGanze Slices laden bringt meistens kaum einen Vorteil und füllt den Speicher unnötig, deshalb kleinere zufällige Patches
-def random_aligned_crop(hr_tensor, lr_tensor, hr_patch=128, scale=2):
-    # hr_tensor: [1, H, W], lr_tensor: [1, H/2, W/2] bei scale=2
+#Loading whole slices is usually not worth it and fills the memory unnecessarily, so smaller random patches
+def random_aligned_crop(hr_tensor, *, hr_patch: int, scale: int, seed: int):
+    """
+    Deterministic HR-only random crop aligned to scale multiples, matching the logic in __getitem__.
+    - hr_tensor: [1,H,W]
+    - Returns: cropped HR tensor [1, hr_patch, hr_patch] or original if too small.
+    - Uses the provided seed to ensure deterministic behavior per epoch/slice.
+    """
     _, H, W = hr_tensor.shape
-    assert hr_patch % scale == 0, "hr_patch muss Vielfaches von scale sein"
-    lr_patch = hr_patch // scale
-
-    # sichere Grenzen
-    max_y_hr = H - hr_patch
-    max_x_hr = W - hr_patch
-    if max_y_hr < 0 or max_x_hr < 0:
-        # Falls das Bild kleiner als der Patch ist: auf ganze Slice zurückfallen
-        return lr_tensor, hr_tensor
-
-    # zufällige, scale-ausgerichtete Startpunkte
-    rng = np.random.default_rng()
-    y_hr = int(rng.integers(0, max_y_hr + 1))
-    x_hr = int(rng.integers(0, max_x_hr + 1))
-    # LR-Koordinaten entsprechend skaliert
-    y_lr = y_hr // scale
-    x_lr = x_hr // scale
-
-    hr_crop = hr_tensor[:, y_hr:y_hr+hr_patch, x_hr:x_hr+hr_patch]
-    lr_crop = lr_tensor[:, y_lr:y_lr+lr_patch, x_lr:x_lr+lr_patch]
-    return lr_crop, hr_crop
+    if hr_patch is None:
+        return hr_tensor
+    if H < hr_patch or W < hr_patch:
+        return hr_tensor
+    max_y = H - hr_patch
+    max_x = W - hr_patch
+    rng = np.random.default_rng(int(seed))
+    y0 = int(rng.integers(0, max_y + 1)) if max_y > 0 else 0
+    x0 = int(rng.integers(0, max_x + 1)) if max_x > 0 else 0
+    hr_crop = hr_tensor[:, y0:y0+hr_patch, x0:x0+hr_patch]
+    return hr_crop
 
 
-def apply_window(img, center, width):
-    min_val = center - width / 2
-    max_val = center + width / 2
-    img = np.clip(img, min_val, max_val)
-    img = (img - min_val) / (max_val - min_val)  # [0,1]
-    img = img * 2 - 1  # [-1,1]
-    return img.astype(np.float32)
 
 
 def is_ct_image_dicom(path):
@@ -253,18 +242,8 @@ class CT_Dataset_SR(Dataset):
         hr_full = load_dicom_as_tensor(self.paths[idx], hu_clip=self.hu_clip)   # [1, H, W]
         # choose HR region
         if self.do_random_crop and self.hr_patch is not None:
-            _, H, W = hr_full.shape
-            if H >= self.hr_patch and W >= self.hr_patch:
-                max_y = H - self.hr_patch
-                max_x = W - self.hr_patch
-                # deterministic crop per slice and epoch
-                seed_crop = self._seed_for_item(getattr(self, "_current_epoch", 0), idx, "crop")
-                rng = np.random.default_rng(seed_crop)
-                y0 = int(rng.integers(0, max_y + 1)) if max_y > 0 else 0
-                x0 = int(rng.integers(0, max_x + 1)) if max_x > 0 else 0
-                hr = hr_full[:, y0:y0+self.hr_patch, x0:x0+self.hr_patch]
-            else:
-                hr = hr_full
+            seed_crop = self._seed_for_item(getattr(self, "_current_epoch", 0), idx, "crop")
+            hr = random_aligned_crop(hr_full, hr_patch=self.hr_patch, scale=self.scale, seed=seed_crop)
         else:
             # center-crop to multiples of scale for full-slice evaluation
             hr = hr_full

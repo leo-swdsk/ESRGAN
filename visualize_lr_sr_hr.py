@@ -16,25 +16,8 @@ from skimage.metrics import structural_similarity as ssim
 import io, contextlib
 from metrics_core import compute_all_metrics
 from ct_series_loader import load_series_hu, load_series_windowed
+from windowing import apply_window
 
-
-def apply_window_np(img, center, width):
-    min_val = center - width / 2.0
-    max_val = center + width / 2.0
-    img = np.clip(img.astype(np.float32), min_val, max_val)
-    img = (img - min_val) / (max_val - min_val)
-    img = img * 2.0 - 1.0
-    return img.astype(np.float32)
-
-
-def load_ct_volume(folder_path, preset="soft_tissue", override_window=None):
-    # Kept for backward compatibility: delegate to centralized loader
-    return load_series_windowed(folder_path, preset=preset, override_window=override_window)
-
-
-def load_ct_volume_hu(folder_path):
-    # Kept for backward compatibility: delegate to centralized loader
-    return load_series_hu(folder_path)
 
 
 def read_series_metadata(folder_path):
@@ -916,7 +899,7 @@ def main():
 
 
     # ---------- Daten laden (HU + Meta) ----------
-    hr_hu_vol, slice_meta = load_ct_volume_hu(args.dicom_folder)  # HU via pydicom.apply_modality_lut
+    hr_hu_vol, slice_meta = load_series_hu(args.dicom_folder)  # HU via pydicom.apply_modality_lut
     (row_mm, col_mm), slice_thickness, patient_id = read_series_metadata(args.dicom_folder)
 
     # Center-Crop HU auf Scale-Multiples (vor jeder Normalisierung!)

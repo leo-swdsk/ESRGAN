@@ -74,13 +74,7 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
     return lr
 
 
-def apply_window_np(img, center, width):
-    min_val = center - width / 2.0
-    max_val = center + width / 2.0
-    img = np.clip(img.astype(np.float32), min_val, max_val)
-    img = (img - min_val) / (max_val - min_val)
-    img = img * 2.0 - 1.0
-    return img.astype(np.float32)
+from windowing import apply_window
 
 
 def load_ct_volume(folder_path, preset="soft_tissue"):
