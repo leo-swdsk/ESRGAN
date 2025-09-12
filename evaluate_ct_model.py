@@ -7,6 +7,7 @@ import math
 from collections import defaultdict
 
 import torch
+from datetime import datetime
 
 from rrdb_ct_model import RRDBNet_CT
 from seed_utils import fixed_seed_for_path
@@ -120,12 +121,17 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             metrics_tag = "globalHU"
     eval_config['metrics']['mode'] = metrics_mode
 
-    # Output files include model name tag and normalization tag; also append split suffix for clarity
+    # Output run directory and short artifact names
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
     limited = (max_patients is not None) or (max_slices_per_patient is not None)
     suffix = f"_on_{'limited_' if limited else ''}{split_name}_set"
-    csv_path = os.path.join(output_dir, f"metrics_{split_name}_{model_tag}__{metrics_tag}{suffix}.csv")
-    json_path = os.path.join(output_dir, f"summary_{split_name}_{model_tag}__{metrics_tag}{suffix}.json")
+    run_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_tag = f"{split_name}__{model_tag}__{metrics_tag}{suffix}__{run_ts}"
+    base_dir = os.path.join(output_dir, run_tag)
+    ensure_dir(base_dir)
+    print(f"[Eval] Run directory: {base_dir}")
+    csv_path = os.path.join(base_dir, "metrics.csv")
+    json_path = os.path.join(base_dir, "summary.json")
 
     # Collect per-slice metrics and per-patient aggregations
     fieldnames = ['patient_id', 'deg_seed', 'slice_index', 'method', 'MSE', 'RMSE', 'MAE', 'PSNR', 'SSIM', 'LPIPS', 'MA', 'NIQE', 'PI']
@@ -297,8 +303,9 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         'split': split_name,
         'num_patients': len(patient_dirs),
         'paths': {
-            'csv': csv_path,
-            'json': json_path
+            'csv': 'metrics.csv',
+            'json': 'summary.json',
+            'plots_dir': 'plots/'
         },
         'config': eval_config,
         'deg_seeds_per_patient': patient_to_used_seed,
@@ -325,6 +332,219 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
 
     print(f"[Eval] Wrote per-slice CSV to: {csv_path}")
     print(f"[Eval] Wrote summary JSON to: {json_path}")
+
+    # -------------------- Headless plot routine --------------------
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        try:
+            import seaborn as sns  # optional, for nicer palettes/heatmaps
+        except Exception:
+            sns = None
+
+        plots_dir = os.path.join(base_dir, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+
+        # Common config
+        def _get_palette(n):
+            if sns is not None:
+                return sns.color_palette('Set2', n_colors=n)
+            # simple matplotlib tab10 fallback
+            import itertools
+            colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', ['C0','C1','C2','C3','C4','C5','C6','C7','C8','C9'])
+            return list(itertools.islice(colors, n))
+
+        # Consistent method order across plots
+        present_methods = list(global_summary.keys())
+        preferred = [
+            'Interpolation (Bilinear)',
+            'Interpolation (Bicubic)',
+            'Model (RRDB)'
+        ]
+        method_order = [m for m in preferred if m in present_methods] + [m for m in sorted(present_methods) if m not in preferred]
+
+        # Helper to filter finite values
+        def _finite(vals):
+            return [v for v in vals if isinstance(v, (int, float)) and math.isfinite(float(v))]
+
+        # 1) Bar charts – Global (per slice)
+        metrics_to_plot = [
+            ('PSNR', 'PSNR (↑)'),
+            ('SSIM', 'SSIM (↑)'),
+            ('LPIPS', 'LPIPS (↓)'),
+            ('PI', 'PI (↓)'),
+            ('RMSE', 'RMSE (↓)'),
+            ('MAE', 'MAE (↓)')
+        ]
+
+        for metric_key, metric_title in metrics_to_plot:
+            xs, ys, es, used_methods = [], [], [], []
+            for m in method_order:
+                g = global_summary.get(m, {}).get(metric_key)
+                if g is None or not all(k in g for k in ['mean','std']):
+                    print(f"[Plots] Skipping method '{m}' for global {metric_key}: no stats")
+                    continue
+                if not (math.isfinite(g['mean']) and math.isfinite(g['std'])):
+                    print(f"[Plots] Skipping method '{m}' for global {metric_key}: non-finite stats")
+                    continue
+                used_methods.append(m)
+                xs.append(m)
+                ys.append(float(g['mean']))
+                es.append(float(g['std']))
+            if len(used_methods) == 0:
+                print(f"[Plots] No valid data for global bar chart: {metric_key}")
+            else:
+                plt.figure(figsize=(8, 5))
+                colors = _get_palette(len(used_methods))
+                bars = plt.bar(range(len(xs)), ys, yerr=es, color=colors, capsize=4)
+                plt.xticks(range(len(xs)), xs, rotation=20, ha='right')
+                plt.ylabel(metric_title)
+                plt.xlabel('Method')
+                plt.title(f"Global per-slice: {metric_title}")
+                plt.tight_layout()
+                plot_id = f"bar_global_{metric_key}"
+                out_path = os.path.join(plots_dir, f"{plot_id}.png")
+                plt.savefig(out_path, dpi=150)
+                plt.close()
+                print(f"[Plots] Saved: {out_path}")
+
+        # 2) Bar charts – Patient-Level (mean of patient means)
+        for metric_key, metric_title in metrics_to_plot:
+            xs, ys, es, used_methods = [], [], [], []
+            for m in method_order:
+                g = patient_level_agg.get(m, {}).get(metric_key)
+                if g is None or not all(k in g for k in ['mean_of_patient_means','std_of_patient_means']):
+                    print(f"[Plots] Skipping method '{m}' for patient-level {metric_key}: no stats")
+                    continue
+                mean_v = float(g['mean_of_patient_means'])
+                std_v = float(g['std_of_patient_means'])
+                if not (math.isfinite(mean_v) and math.isfinite(std_v)):
+                    print(f"[Plots] Skipping method '{m}' for patient-level {metric_key}: non-finite stats")
+                    continue
+                used_methods.append(m)
+                xs.append(m)
+                ys.append(mean_v)
+                es.append(std_v)
+            if len(used_methods) == 0:
+                print(f"[Plots] No valid data for patient-level bar chart: {metric_key}")
+            else:
+                plt.figure(figsize=(8, 5))
+                colors = _get_palette(len(used_methods))
+                bars = plt.bar(range(len(xs)), ys, yerr=es, color=colors, capsize=4)
+                plt.xticks(range(len(xs)), xs, rotation=20, ha='right')
+                plt.ylabel(metric_title)
+                plt.xlabel('Method')
+                plt.title(f"Patient-level: {metric_title}")
+                plt.tight_layout()
+                plot_id = f"bar_patient_{metric_key}"
+                out_path = os.path.join(plots_dir, f"{plot_id}.png")
+                plt.savefig(out_path, dpi=150)
+                plt.close()
+                print(f"[Plots] Saved: {out_path}")
+
+        # 3) Boxplots – Distributions (per slice) for PSNR, SSIM, LPIPS
+        box_metrics = [('PSNR', 'PSNR (↑)'), ('SSIM', 'SSIM (↑)'), ('LPIPS', 'LPIPS (↓)')]
+        # Collect data per method from rows
+        for metric_key, metric_title in box_metrics:
+            data = []
+            labels = []
+            for m in method_order:
+                vals = [float(r[metric_key]) for r in rows if r.get('method') == m and (metric_key in r)]
+                vals = _finite(vals)
+                if len(vals) == 0:
+                    print(f"[Plots] Skipping method '{m}' in boxplot {metric_key}: no finite values")
+                    continue
+                labels.append(m)
+                data.append(vals)
+            if len(data) == 0:
+                print(f"[Plots] No valid data for boxplot: {metric_key}")
+            else:
+                plt.figure(figsize=(8, 5))
+                if sns is not None:
+                    # Build a long-form dataset for seaborn
+                    import pandas as pd
+                    long_vals = []
+                    long_meth = []
+                    for lbl, arr in zip(labels, data):
+                        long_vals.extend(arr)
+                        long_meth.extend([lbl] * len(arr))
+                    df = pd.DataFrame({'Method': long_meth, metric_key: long_vals})
+                    ax = sns.boxplot(data=df, x='Method', y=metric_key, order=labels, palette=_get_palette(len(labels)))
+                    ax.set_xticklabels(ax.get_xticklabels(), rotation=20, ha='right')
+                    plt.ylabel(metric_title)
+                    plt.xlabel('Method')
+                    plt.title(f"Distribution per slice: {metric_title}")
+                else:
+                    plt.boxplot(data, tick_labels=labels, patch_artist=True)
+                    plt.xticks(rotation=20, ha='right')
+                    plt.ylabel(metric_title)
+                    plt.xlabel('Method')
+                    plt.title(f"Distribution per slice: {metric_title}")
+                plt.tight_layout()
+                plot_id = f"boxplot_{metric_key}"
+                out_path = os.path.join(plots_dir, f"{plot_id}.png")
+                plt.savefig(out_path, dpi=150)
+                plt.close()
+                print(f"[Plots] Saved: {out_path}")
+
+        # 4) Correlation heatmap of metrics for "Model (RRDB)" (fallback to first available)
+        corr_metrics = ['PSNR', 'SSIM', 'LPIPS', 'PI', 'RMSE', 'MAE']
+        method_for_corr = 'Model (RRDB)' if 'Model (RRDB)' in method_order else (method_order[0] if len(method_order) > 0 else None)
+        if method_for_corr is None:
+            print("[Plots] Skipping correlation heatmap: no methods available")
+        else:
+            # Gather per-slice rows for selected method, ensuring all metrics are finite per row
+            matrix = []
+            for r in rows:
+                if r.get('method') != method_for_corr:
+                    continue
+                vals = []
+                ok = True
+                for mk in corr_metrics:
+                    v = float(r.get(mk, float('nan')))
+                    if not math.isfinite(v):
+                        ok = False
+                        break
+                    vals.append(v)
+                if ok:
+                    matrix.append(vals)
+            if len(matrix) < 2:
+                print(f"[Plots] Skipping correlation heatmap: insufficient valid samples for method '{method_for_corr}'")
+            else:
+                import numpy as _np
+                mat = _np.asarray(matrix, dtype=float)
+                # Compute Pearson correlation across columns
+                with _np.errstate(invalid='ignore'):
+                    C = _np.corrcoef(mat, rowvar=False)
+                # Replace any nan with 0 for visualization simplicity
+                C = _np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
+                plt.figure(figsize=(7, 6))
+                if sns is not None:
+                    ax = sns.heatmap(C, xticklabels=corr_metrics, yticklabels=corr_metrics, annot=True, fmt='.2f', cmap='vlag', vmin=-1, vmax=1, square=True)
+                    plt.title(f"Pearson correlation – {method_for_corr}")
+                else:
+                    plt.imshow(C, cmap='coolwarm', vmin=-1, vmax=1)
+                    plt.colorbar()
+                    plt.xticks(range(len(corr_metrics)), corr_metrics, rotation=20, ha='right')
+                    plt.yticks(range(len(corr_metrics)), corr_metrics)
+                    plt.title(f"Pearson correlation – {method_for_corr}")
+                plt.tight_layout()
+                def _sanitize_method_for_fn(name: str) -> str:
+                    s = name.lower()
+                    for ch in [' ', '(', ')', '[', ']', '{', '}', '/', '\\', ':', ';', ',', '\'', '"']:
+                        s = s.replace(ch, '-')
+                    s = ''.join(c for c in s if (c.isalnum() or c in ['-','_']))
+                    while '--' in s:
+                        s = s.replace('--', '-')
+                    return s.strip('-_')
+                plot_id = "corr_heatmap" if method_for_corr == 'Model (RRDB)' else f"corr_heatmap_{_sanitize_method_for_fn(method_for_corr)}"
+                out_path = os.path.join(plots_dir, f"{plot_id}.png")
+                plt.savefig(out_path, dpi=150)
+                plt.close()
+                print(f"[Plots] Saved: {out_path}")
+    except Exception as e:
+        print(f"[Plots] Plotting failed: {type(e).__name__}: {e}")
 
 
 def main():

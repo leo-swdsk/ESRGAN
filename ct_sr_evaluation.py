@@ -282,23 +282,8 @@ def compare_methods(lr_tensor, hr_tensor, model,
         # Compute metrics
         results = {
         "Model (RRDB)": evaluate_metrics(sr_m, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
-        "Interpolation (Linear)": evaluate_metrics(sr_linear, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
+        "Interpolation (Bilinear)": evaluate_metrics(sr_linear, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
         "Interpolation (Bicubic)": evaluate_metrics(sr_cubic, hr_m, hu_clip=hu_clip, metrics_mode=metrics_mode, window_center=window_center, window_width=window_width, metrics_device=metrics_device),
     }
     return results
 
-# Beispiel:
-if __name__ == "__main__":
-    # Dummydaten
-    hr = torch.rand(1, 512, 512) * 2 - 1  # [-1, 1]
-    lr = F.interpolate(hr.unsqueeze(0), scale_factor=0.5, mode='bilinear', align_corners=False).squeeze(0)
-
-    from rrdb_ct_model import RRDBNet_CT
-    model = RRDBNet_CT()
-
-    # Vergleich durchführen
-    result = compare_methods(lr, hr, model)
-    for method, metrics in result.items():
-        print(f"{method}:")
-        for k, v in metrics.items():
-            print(f"  {k}: {v:.4f}")
