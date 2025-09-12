@@ -21,10 +21,22 @@ python preprocess_resample_ct.py --root "C:\...\Spine-Mets-CT-SEG" --out_dir "D:
 ```bash
 python train_ct_sr.py
 ```
-- Alternativ mit expliziten Parametern (Beispielwerte = Defaults):
-```bash
-python train_ct_sr.py --data_root "preprocessed_data" --scale 2 --epochs 50 --batch_size 10 --patch_size 192 --patience 5 --lr 1e-4 --degradation blurnoise --blur_sigma_range 0.7 0.9 --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5
-```
+- Kurze Trainingsprompts je Degradationsmodus (nur wesentliche Flags):
+
+  - Clean (nur Downsample; optional sanfter mit Antialias):
+  ```bash
+  python train_ct_sr.py --degradation clean --antialias_clean
+  ```
+
+  - Blur (Gauss-Blur → Downsample, kein Noise; Defaults für σ werden automatisch gewählt):
+  ```bash
+  python train_ct_sr.py --degradation blur
+  ```
+
+  - Blurnoise (Gauss-Blur → Downsample → dosis-skaliertes Rauschen):
+  ```bash
+  python train_ct_sr.py --degradation blurnoise
+  ```
 - Hinweise:
   - `patch_size` muss durch `scale` teilbar sein.
   - Für Verwendung ohne Preprocessing: `--data_root` auf den Rohdaten-Root setzen.
@@ -129,7 +141,7 @@ python dump_patient_split.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Supe
 Standard: `--degradation blurnoise`. Ziel ist die realistischere Simulation einer Dosisreduktion (mehr Rauschen, etwas unschärfer), auf der das Modell trainiert, validiert, evaluiert und visualisiert wird.
 
 - Modi:
-  - **clean**: nur Downsample; optional mit `--antialias_clean` (Standard für clean). Kein Blur, kein Noise.
+  - **clean**: nur Downsample; optional mit `--antialias_clean` (Default: aus; empfohlen für „sanftes“ Downsampling). Kein Blur, kein Noise.
   - **blur**: Gauss-Blur (σ abhängig von Scale bzw. per Range), dann Downsample mit `antialias=False`, kein Noise.
   - **blurnoise** (Default): Gauss-Blur → Downsample (`antialias=False`) → Gaussian-Noise mit dosisbasierter Skalierung.
 

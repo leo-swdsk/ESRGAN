@@ -398,6 +398,20 @@ if __name__ == "__main__":
         blur_sigma_range_eff = None
         blur_kernel_eff = None
 
+    # Degradation-dependent metadata fields
+    if args.degradation == 'blurnoise':
+        noise_sigma_range_meta = args.noise_sigma_range_norm
+        dose_factor_range_meta = args.dose_factor_range
+        degradation_notes = "blur+downsample+noise; antialias disabled"
+    elif args.degradation == 'blur':
+        noise_sigma_range_meta = None  # ignored in 'blur'
+        dose_factor_range_meta = None  # ignored in 'blur'
+        degradation_notes = "blur+downsample only; noise ignored; antialias disabled"
+    else:  # 'clean'
+        noise_sigma_range_meta = None  # ignored in 'clean'
+        dose_factor_range_meta = None  # ignored in 'clean'
+        degradation_notes = f"downsample only; blur/noise ignored; antialias_clean={bool(args.antialias_clean)}"
+
     meta = {
         "experiment": exp_name,
         "run_dir": run_dir,
@@ -411,8 +425,9 @@ if __name__ == "__main__":
         "degradation": args.degradation,
         "blur_sigma_range": blur_sigma_range_eff,
         "blur_kernel": blur_kernel_eff,
-        "noise_sigma_range_norm": args.noise_sigma_range_norm,
-        "dose_factor_range": args.dose_factor_range,
+        "noise_sigma_range_norm": noise_sigma_range_meta,
+        "dose_factor_range": dose_factor_range_meta,
+        "antialias_clean": bool(args.antialias_clean),
         "degradation_sampling": {
             "train": "volume (per-epoch resample)",
             "val": "volume (fixed per patient)",
@@ -423,7 +438,8 @@ if __name__ == "__main__":
             "n_val_vols": len(val_dirs),
             "n_test_vols": len(test_dirs)
         },
-        "notes": "L1 pretraining with per-epoch volume-wise degradation resampling"
+        "notes": "L1 pretraining with per-epoch volume-wise degradation resampling",
+        "degradation_notes": degradation_notes
     }
     # write JSON sidecar
     try:

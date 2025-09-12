@@ -174,8 +174,13 @@ class CT_Dataset_SR(Dataset):
             # initial sample for epoch 0 based on base seed + patient
             self.resample_volume_params(epoch_seed=0)
         print(f"[CT-Loader] Dataset ready: {len(self.paths)} slices | scale={self.scale} | norm=global_HU_clip={self.hu_clip} | random_crop={self.do_random_crop}")
-        print(f"[CT-Loader] Degradation='{self.degradation}' | blur_sigma_range={self.blur_sigma_range} | blur_kernel={self.blur_kernel} | noise_sigma_range_norm={self.noise_sigma_range_norm} | dose_factor_range={self.dose_factor_range}")
-        print(f"[CT-Loader] Degradation sampling mode='{self.degradation_sampling}' | deg_seed={self.deg_seed}")
+        if self.degradation == 'clean':
+            # In clean mode, only downsampling is used; blur/noise settings are not applied
+            print(f"[CT-Loader] Degradation='clean' | downsample only (antialias={self.antialias_clean}) | blur/noise parameters unused")
+            print(f"[CT-Loader] Degradation sampling: n/a for 'clean'")
+        else:
+            print(f"[CT-Loader] Degradation='{self.degradation}' | blur_sigma_range={self.blur_sigma_range} | blur_kernel={self.blur_kernel} | noise_sigma_range_norm={self.noise_sigma_range_norm} | dose_factor_range={self.dose_factor_range}")
+            print(f"[CT-Loader] Degradation sampling mode='{self.degradation_sampling}' | deg_seed={self.deg_seed}")
 
     def _seed_for_epoch(self, epoch_seed: int) -> int:
         key = f"{int(self.deg_seed)}|{self.patient_id}|{int(epoch_seed)}"
