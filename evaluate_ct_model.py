@@ -153,6 +153,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     # helper for per-patient deterministic seed
     patient_to_used_seed = {}
     with torch.no_grad():
+        patient_to_degradation_sampled = {}
         for p_idx, patient_dir in enumerate(patient_dirs):
             patient_id = os.path.basename(patient_dir)
 
@@ -186,9 +187,15 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             if degradation_sampling == 'volume':
                 try:
                     if hasattr(ds, 'deg_params') and ds.deg_params:
+                        # Note: This field is overwritten for each patient inside the loop below and
+                        # therefore ends up reflecting ONLY the values of the LAST processed patient in the split.
+                        # It is NOT a global value "for all patients". For per-patient values, consult
+                        # the separate 'patient_to_degradation_sampled' object stored in the summary JSON.
                         eval_config["degradation_sampled"] = ds.deg_params
                         if eval_config.get("blur_kernel_effective") is None:
                             eval_config["blur_kernel_effective"] = ds.deg_params.get("kernel")
+                        # store per-patient sampled parameters for later viewer reuse
+                        patient_to_degradation_sampled[patient_id] = ds.deg_params
                 except Exception:
                     pass
             # Print effective parameters now that dataset is initialized
@@ -233,6 +240,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                 for method_name, metrics in results.items():
                     rows.append({
                         'patient_id': patient_id,
+                        'deg_seed': patient_to_used_seed.get(patient_id, None),
                         'slice_index': s_idx,
                         'method': method_name,
                         'MSE': float(metrics['MSE']),
@@ -304,6 +312,19 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
             m, s = mean_std(patient_means)
             patient_level_agg[method_name][metric_name] = {'mean_of_patient_means': m, 'std_of_patient_means': s, 'num_patients': len(patient_means)}
 
+    # Before writing JSON: ensure config contains effective (non-null) values for blur params
+    try:
+        if eval_config.get('blur_sigma_range') is None and eval_config.get('blur_sigma_range_effective') is not None:
+            # store the effective range actually used when None was provided
+            eval_config['blur_sigma_range'] = eval_config['blur_sigma_range_effective']
+        if eval_config.get('blur_kernel') is None:
+            if eval_config.get('blur_kernel_effective') is not None:
+                eval_config['blur_kernel'] = eval_config['blur_kernel_effective']
+            else:
+                eval_config['blur_kernel'] = 'auto(by-sigma)'
+    except Exception:
+        pass
+
     # Write JSON summary
     summary = {
         'split': split_name,
@@ -315,6 +336,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         },
         'config': eval_config,
         'deg_seeds_per_patient': patient_to_used_seed,
+        'patient_to_degradation_sampled': patient_to_degradation_sampled,
         'global_per_slice': global_summary,
         'per_patient': per_patient_summary,
         'patient_level_aggregate': patient_level_agg
@@ -476,8 +498,11 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                         long_vals.extend(arr)
                         long_meth.extend([lbl] * len(arr))
                     df = pd.DataFrame({'Method': long_meth, metric_key: long_vals})
-                    ax = sns.boxplot(data=df, x='Method', y=metric_key, order=labels, palette=_get_palette(len(labels)))
-                    ax.set_xticklabels(ax.get_xticklabels(), rotation=20, ha='right')
+                    ax = sns.boxplot(data=df, x='Method', y=metric_key, order=labels, hue='Method', palette=_get_palette(len(labels)), dodge=False)
+                    if ax.legend_ is not None:
+                        ax.legend_.remove()
+                    import matplotlib.pyplot as _plt
+                    _plt.setp(ax.get_xticklabels(), rotation=20, ha='right')
                     plt.ylabel(metric_title)
                     plt.xlabel('Method')
                     plt.title(f"Distribution per slice: {metric_title}")

@@ -883,6 +883,7 @@ def main():
     parser.add_argument('--degradation_sampling', type=str, default='volume', choices=['volume','slice','det-slice'], help='Degradation sampling mode (volume|slice|det-slice) [viewer applies uniformly per volume]')
     parser.add_argument('--deg_seed_mode', type=str, default='per_patient', choices=['global','per_patient'], help='How to derive degradation seed (global fixed vs per_patient hashed by path)')
     parser.add_argument('--deg_seed', type=int, default=42, help='Base seed for degradation sampling in viewer')
+    parser.add_argument('--eval_summary', type=str, default=None, help='Optional path to evaluation summary.json to reuse per-patient sampled degradation params')
     args = parser.parse_args()
 
     # ---------- Modell ----------
@@ -917,6 +918,35 @@ def main():
     hr_norm_vol = hu_to_m11_global(hr_hu_vol, lo, hi)  # [-1,1]
 
     print(f"[Vis] Degradation='{args.degradation}' | blur_sigma_range={args.blur_sigma_range} | blur_kernel={args.blur_kernel} | noise_sigma_range_norm={args.noise_sigma_range_norm} | dose_factor_range={args.dose_factor_range}")
+
+    # If eval_summary is provided, try to load per-patient sampled params and enforce them
+    enforced_params = None
+    if args.eval_summary is not None:
+        try:
+            import json
+            with open(args.eval_summary, 'r') as f:
+                summ = json.load(f)
+            # patient id was parsed from dicoms above
+            p2s = summ.get('patient_to_degradation_sampled') or {}
+            # fallback to deg_seeds map for verification only
+            enforced_params = p2s.get(patient_id)
+            if enforced_params:
+                print(f"[Vis] Using sampled degradation from eval summary for patient={patient_id}: {enforced_params}")
+                # Enforce as point intervals
+                try:
+                    if 'sigma' in enforced_params:
+                        args.blur_sigma_range = [float(enforced_params['sigma']), float(enforced_params['sigma'])]
+                    if 'kernel' in enforced_params and (args.blur_kernel is None):
+                        args.blur_kernel = int(enforced_params['kernel'])
+                    if 'noise_sigma' in enforced_params:
+                        args.noise_sigma_range_norm = [float(enforced_params['noise_sigma']), float(enforced_params['noise_sigma'])]
+                    if 'dose' in enforced_params:
+                        args.dose_factor_range = [float(enforced_params['dose']), float(enforced_params['dose'])]
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Vis] Failed to load eval summary: {e}")
+
     used_seed = int(args.deg_seed) if str(args.deg_seed_mode) == 'global' else fixed_seed_for_path(args.dicom_folder, int(args.deg_seed))
     print(f"[Vis] Degradation sampling='{args.degradation_sampling}' (viewer uses per-volume) | deg_seed_mode={args.deg_seed_mode} | base_seed={args.deg_seed} | used_seed={used_seed}")
     # RNG for degradation sampling (per-volume)

@@ -122,6 +122,22 @@ python evaluate_ct_model.py --root "preprocessed_data" --split test --model_path
 python visualize_lr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\preprocessed_data\15041pp" --preset soft_tissue --degradation blurnoise --dose_factor_range 0.25 0.5
 ```
 
+#### Viewer – identisch zur Evaluation (per summary.json)
+- Nutzt die per Patient in der Evaluation gezogenen Degradationswerte aus `summary.json` und erzwingt sie als Punktintervalle.
+- Ergebnis: Die Viewer-Metriken pro Slice entsprechen den CSV-Werten (bei gleicher Fensterung, z. B. `--preset global`).
+```bash
+python visualize_lr_sr_hr.py \
+  --dicom_folder "preprocessed_data\14655pp" \
+  --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" \
+  --device cuda --scale 2 --preset global \
+  --degradation blurnoise --degradation_sampling volume --deg_seed_mode per_patient --deg_seed 42 \
+  --eval_summary "eval_results\test__best__globalHU_-1000_2000_on_test_set__YYYYMMDD-HHMMSS\summary.json"
+```
+- Hinweise:
+  - `--eval_summary` entnimmt aus `patient_to_degradation_sampled` die Werte für den angegebenen Patienten und setzt `sigma`, `kernel`, `noise_sigma`, `dose` fix.
+  - Passe `--dicom_folder` (z. B. `14655pp`) und den Pfad zur `summary.json` an deinen Lauf an.
+  - Für andere Patienten einfach den jeweiligen Ordner wählen; die Werte werden automatisch übernommen.
+
 - LR vs SR vs HR (SR via Modell, interaktiv)
 ```bash
 python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\15041" --model_path rrdb_x2_blurnoise_best.pth --device cuda --preset soft_tissue --degradation blurnoise --dose_factor_range 0.25 0.5
