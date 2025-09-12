@@ -116,13 +116,6 @@ python visualize_lr_sr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarb
 python dump_patient_split.py --root "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG" --seed 42 
 ```
 
-### Schnelltest (Legacy ESRGAN RGB, optional)
-- Test der Original-ESRGAN-Demo (RGB, nicht CT-spezifisch)
-```bash
-python test.py
-```
-Modelle in `models/` ablegen, LR-Bilder in `LR/`.
-
 ### Hinweise
 - Fensterung/Normalisierung: Werte in [-1,1]; Metriken werden auf [0,1] berechnet.
 - Evaluierung: Verwende für finale Zahlen ausschließlich den Testsplit. Val nur für Selektion/Tuning.

@@ -78,7 +78,8 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     # Resume support
     best_val = float('inf')
     global_step = 0
-    start_epoch = 0
+    start_epoch = 1
+    last_epoch = start_epoch - 1
     scaler = amp.GradScaler(enabled=use_cuda)
     if resume_path is not None and os.path.isfile(resume_path):
         ckpt = torch.load(resume_path, map_location=device)
@@ -93,7 +94,8 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
                     except Exception:
                         pass
                 best_val = float(ckpt.get('best_val', best_val))
-                start_epoch = int(ckpt.get('epoch', 0))
+                # resume from next epoch after the one stored in checkpoint
+                start_epoch = int(ckpt.get('epoch', 0)) + 1
                 global_step = int(ckpt.get('global_step', 0))
                 print(f"[Resume] Loaded checkpoint from {resume_path} | epoch={start_epoch} global_step={global_step} best_val={best_val:.6f}")
             except Exception as e:
@@ -102,7 +104,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
     epochs_no_improve = 0
     train_losses, val_losses = [], []
 
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, num_epochs + 1):
         # Resample degradation params for all training sub-datasets (ConcatDataset)
         subdatasets = getattr(train_loader.dataset, "datasets", None)
         if subdatasets is not None:
@@ -145,13 +147,13 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
 
         elapsed = time.perf_counter() - t0
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"[Train] Epoch {epoch+1}/{num_epochs} done | train L1: {avg_train:.6f} | val L1: {avg_val:.6f} | lr={current_lr:.6f} | time={elapsed:.1f}s")
+        print(f"[Train] Epoch {epoch}/{num_epochs} done | train L1: {avg_train:.6f} | val L1: {avg_val:.6f} | lr={current_lr:.6f} | time={elapsed:.1f}s")
 
         # Append CSV row
         try:
             with open(csv_path, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([epoch + 1, global_step, f"{avg_train:.6f}", f"{avg_val:.6f}", f"{current_lr:.6f}", f"{elapsed:.2f}"])
+                writer.writerow([epoch, global_step, f"{avg_train:.6f}", f"{avg_val:.6f}", f"{current_lr:.6f}", f"{elapsed:.2f}"])
         except Exception as e:
             print(f"[CSV] Could not append metrics: {e}")
 
@@ -160,7 +162,7 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
             best_val = avg_val
             epochs_no_improve = 0
             payload = {
-                'epoch': epoch + 1,
+                'epoch': epoch,
                 'global_step': global_step,
                 'model': model.state_dict(),
                 'optimizer_g': optimizer.state_dict(),
@@ -178,9 +180,12 @@ def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, pati
                 print(f"[Train] Early stopping. Best val: {best_val:.6f}")
                 break
 
+        # track last completed epoch
+        last_epoch = epoch
+
     # Save last model
     payload_last = {
-        'epoch': start_epoch + len(train_losses),
+        'epoch': int(last_epoch),
         'global_step': global_step,
         'model': model.state_dict(),
         'optimizer_g': optimizer.state_dict(),
