@@ -84,40 +84,9 @@ def apply_window_np(img, center, width):
 
 
 def load_ct_volume(folder_path, preset="soft_tissue"):
-    """Load only CT image DICOMs; expand multi-frame to per-slice tensors. Returns [D,1,H,W] in [-1,1]."""
-    window = WINDOW_PRESETS.get(preset, WINDOW_PRESETS["default"])
-    wl, ww = window["center"], window["width"]
-
-    slice_list = []
-    for root, _, files in os.walk(folder_path):
-        for f in sorted(files):
-            if not f.lower().endswith('.dcm'):
-                continue
-            path = os.path.join(root, f)
-            if not is_ct_image_dicom(path):
-                continue
-            try:
-                ds = pydicom.dcmread(path, force=True)
-                arr = ds.pixel_array
-                hu = apply_modality_lut(arr, ds).astype(np.float32)
-                if hu.ndim == 2:
-                    img = apply_window_np(hu, wl, ww)
-                    slice_list.append(torch.tensor(img).unsqueeze(0))  # [1,H,W]
-                elif hu.ndim == 3:
-                    # Multi-frame: expand each frame
-                    for k in range(hu.shape[0]):
-                        img = apply_window_np(hu[k], wl, ww)
-                        slice_list.append(torch.tensor(img).unsqueeze(0))
-            except Exception:
-                continue
-
-    if len(slice_list) == 0:
-        raise RuntimeError(f"No CT image DICOM files found under {folder_path}")
-    # Ensure consistent H,W
-    H, W = slice_list[0].shape[-2:] 
-    slice_list = [s for s in slice_list if s.shape[-2:] == (H, W)]
-    vol = torch.stack(slice_list, dim=0)  # [D,1,H,W]
-    return vol
+    # Delegate to centralized loader for consistency
+    from ct_series_loader import load_series_windowed
+    return load_series_windowed(folder_path, preset=preset)
 
 
 def to_display(img_tensor):
