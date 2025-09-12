@@ -144,7 +144,10 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         print(f"[Eval] Metrics mode: global | hu_clip={hu_clip}")
     else:
         print(f"[Eval] Metrics mode: window | preset={preset} | WL/WW=({window_center},{window_width})")
-    print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={blur_sigma_range} | blur_kernel={blur_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
+    # Log requested/effective (range-level) degradation parameters
+    _disp_blur_range = blur_sigma_range if blur_sigma_range is not None else _default_blur_sigma_range_for_scale(scale)
+    _disp_kernel = blur_kernel if blur_kernel is not None else 'auto(by-sigma)'
+    print(f"[Eval] Using degradation='{degradation}' | blur_sigma_range={_disp_blur_range} | blur_kernel={_disp_kernel} | noise_sigma_range_norm={noise_sigma_range_norm} | dose_factor_range={dose_factor_range} | antialias_clean={antialias_clean}")
     print(f"[Eval] Degradation sampling='{degradation_sampling}' | deg_seed_mode={deg_seed_mode} | base_seed={deg_seed}")
 
     # helper for per-patient deterministic seed
@@ -188,6 +191,8 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                             eval_config["blur_kernel_effective"] = ds.deg_params.get("kernel")
                 except Exception:
                     pass
+            # Print effective parameters now that dataset is initialized
+            print(f"[Eval] Effective degradation | blur_sigma_range={tuple(eval_config['blur_sigma_range_effective'])} | blur_kernel={eval_config['blur_kernel_effective']} | noise_sigma_range_norm={tuple(eval_config['noise_sigma_range_norm_effective'])} | dose_factor_range={tuple(eval_config['dose_factor_range_effective'])}")
             num_slices = len(ds)
             limit_slices = min(num_slices, max_slices_per_patient) if max_slices_per_patient else num_slices
 
@@ -209,10 +214,11 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                     # read metadata from dataset path since CT_Dataset_SR stores file ordering
                     # by construction, ds.paths is aligned to ds indices
                     dicom_path = ds.paths[s_idx]
-                    dsi = pydicom.dcmread(dicom_path, stop_before_pixels=True, force=True)
-                    inst = getattr(dsi, 'InstanceNumber', None)
-                    uid = str(getattr(dsi, 'SOPInstanceUID', ''))
-                    print(f"[Eval SliceMeta] patient={patient_id} idx={s_idx} InstanceNumber={inst} SOPInstanceUID={uid} Path={dicom_path}")
+                    # dsi = pydicom.dcmread(dicom_path, stop_before_pixels=True, force=True)
+                    # inst = getattr(dsi, 'InstanceNumber', None)
+                    # uid = str(getattr(dsi, 'SOPInstanceUID', ''))
+                    if (s_idx % 20) == 0:
+                        print(f"[Eval SliceMeta] patient={patient_id} idx={s_idx} Path={dicom_path}")
                 except Exception:
                     pass
                 results = compare_methods(
@@ -592,8 +598,11 @@ def main():
     print("[Eval-Args] slice_sampling=", args.slice_sampling)
     print("[Eval-Args] seed=", args.seed)
     print("[Eval-Args] degradation=", args.degradation)
-    print("[Eval-Args] blur_sigma_range=", args.blur_sigma_range)
-    print("[Eval-Args] blur_kernel=", args.blur_kernel)
+    # Display effective defaults for blur params if not provided
+    _disp_blur_sigma_range_cli = args.blur_sigma_range if args.blur_sigma_range is not None else _default_blur_sigma_range_for_scale(args.scale)
+    _disp_blur_kernel_cli = args.blur_kernel if args.blur_kernel is not None else 'auto(by-sigma)'
+    print("[Eval-Args] blur_sigma_range=", _disp_blur_sigma_range_cli)
+    print("[Eval-Args] blur_kernel=", _disp_blur_kernel_cli)
     print("[Eval-Args] noise_sigma_range_norm=", args.noise_sigma_range_norm)
     print("[Eval-Args] dose_factor_range=", args.dose_factor_range)
     print("[Eval-Args] antialias_clean=", args.antialias_clean)

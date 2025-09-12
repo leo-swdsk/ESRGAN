@@ -88,6 +88,26 @@ python evaluate_ct_model.py \
 python evaluate_ct_model.py --root "preprocessed_data" --split val --model_path rrdb_x2_blurnoise_best.pth --device cpu
 ```
 
+### Evaluierung – Testsplit reproduzierbar (per-volume Sampling, neue Run-Ordnerstruktur)
+- Führt die Evaluation auf dem Testsplit mit globaler HU-Normalisierung [-1000, 2000] aus.
+- Nutzt dein trainiertes Modell unter `runs\rrdb_x2_blurnoise_20250912-114004\best.pth`.
+- Reproduzierbarkeit: feste Seeds für Slice-Sampling (`--seed 42`) und Degradations-Sampling per Volume (`--degradation_sampling volume --deg_seed 42`).
+- Degradationsmodus `blurnoise` mit standardisierten Parametern, identisch zur Trainingskonfiguration.
+- Outputs: Es wird ein Run-Verzeichnis unter `eval_results/` erstellt (mit Zeitstempel), z. B. `eval_results/test__best__globalHU_-1000_2000_on_test_set__YYYYMMDD-HHMMSS/` mit kurzen Dateinamen:
+  - `metrics.csv`, `summary.json`, sowie Plot-PNGs unter `plots/`.
+```bash
+python evaluate_ct_model.py --root "preprocessed_data" --split test --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" --device cuda --scale 2 --hu_clip -1000 2000 --degradation blurnoise --noise_sigma_range_norm 0.001 0.003 --dose_factor_range 0.25 0.5 --degradation_sampling volume --deg_seed 42 --seed 42
+```
+Dieser obere Befehl ist gleichwertig zu: 
+```bash
+python evaluate_ct_model.py --root "preprocessed_data" --split test --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth"
+```
+
+ Unterschied: seed vs. deg_seed
+ - seed: steuert die allgemeine Auswahllogik, z. B. die Zufallsauswahl von Slices, falls du Limits setzt oder slice_sampling=random nutzt. Hat keinen Effekt, wenn alle Slices ausgewertet werden und keine weitere zufällige Auswahl nötig ist.
+ - deg_seed: steuert ausschließlich die Zufallsziehung der Degradationsparameter (Blur/Noise) für die LR-Erzeugung. In Kombination mit --degradation_sampling (z. B. volume oder det-slice) sorgt er für reproduzierbare Blur-/Noise-Samples.
+
+
 - Abhängigkeiten für LPIPS/PI:
   - Empfohlen: `pip install pyiqa` (liefert LPIPS, NIQE und Ma/NRQM). Alternativ für LPIPS: `pip install lpips`.
   - Falls `pyiqa` ohne Ma/NRQM installiert ist, wird PI ohne Ma berechnet (Surrogat = NIQE), damit keine `nan`‑Werte entstehen.
