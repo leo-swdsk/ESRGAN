@@ -367,11 +367,16 @@ def validate(G_ema: nn.Module, val_loader: DataLoader, device: torch.device, *,
     val_perc *= inv_n
     val_gan *= inv_n
     val_total = lambda_pix * val_l1 + lambda_perc * val_perc + lambda_gan * val_gan
+    val_total_no_gan = lambda_pix * val_l1 + lambda_perc * val_perc
     return {
         'L1': val_l1,
         'Perceptual': val_perc,
         'GAN': val_gan,
         'Total': val_total,
+        'Total_NoGAN': val_total_no_gan,
+        'W_L1': lambda_pix * val_l1,
+        'W_Perc': lambda_perc * val_perc,
+        'W_GAN': lambda_gan * val_gan,
         'MAE': metrics_accum['MAE'],
         'MSE': metrics_accum['MSE'],
         'RMSE': metrics_accum['RMSE'],
@@ -471,11 +476,19 @@ def train_one_epoch(
         torch.cuda.empty_cache()
 
     inv = 1.0 / max(1, it)
+    avg_l1 = running_l1 * inv
+    avg_perc = running_perc * inv
+    avg_gan = running_gan * inv
+    total_no_gan = (1.0 * avg_l1) + (lambda_perc * avg_perc)
     return {
         'total': running_total * inv,
-        'l1': running_l1 * inv,
-        'perc': running_perc * inv,
-        'gan': running_gan * inv,
+        'total_no_gan': total_no_gan,
+        'l1': avg_l1,
+        'perc': avg_perc,
+        'gan': avg_gan,
+        'w_l1': 1.0 * avg_l1,
+        'w_perc': lambda_perc * avg_perc,
+        'w_gan': lambda_gan * avg_gan,
     }
 
 
@@ -538,7 +551,7 @@ def save_checkpoint(out_dir: str,
 
 def plot_curves(history: Dict[str, list], out_dir: str):
     os.makedirs(out_dir, exist_ok=True)
-    # Total loss curves
+    # Total loss curves (with GAN if computed in val; otherwise val_total equals no-GAN)
     try:
         plt.figure(figsize=(8,5))
         if 'train_total' in history:
@@ -554,7 +567,24 @@ def plot_curves(history: Dict[str, list], out_dir: str):
     except Exception as e:
         print(f"[Plot] Could not save loss_total.png: {e}")
 
-    # Components curves
+    # Total loss curves without GAN
+    try:
+        if 'train_total_no_gan' in history or 'val_total_no_gan' in history:
+            plt.figure(figsize=(8,5))
+            if 'train_total_no_gan' in history:
+                plt.plot(history['train_total_no_gan'], label='Train Total (no GAN)')
+            if 'val_total_no_gan' in history:
+                plt.plot(history['val_total_no_gan'], label='Val Total (no GAN)')
+            plt.xlabel('Epoch')
+            plt.ylabel('Total Loss (no GAN)')
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, 'loss_total_nogan.png'), dpi=150)
+            plt.close()
+    except Exception as e:
+        print(f"[Plot] Could not save loss_total_nogan.png: {e}")
+
+    # Unweighted components curves (kept for backward-compat)
     try:
         plt.figure(figsize=(10,6))
         for key, label in [
@@ -571,6 +601,24 @@ def plot_curves(history: Dict[str, list], out_dir: str):
         plt.close()
     except Exception as e:
         print(f"[Plot] Could not save loss_components.png: {e}")
+
+    # Weighted components curves
+    try:
+        plt.figure(figsize=(10,6))
+        for key, label in [
+            ('train_w_l1','Train wL1'), ('train_w_perc','Train wPerc'), ('train_w_gan','Train wGAN'),
+            ('val_w_l1','Val wL1'), ('val_w_perc','Val wPerc'), ('val_w_gan','Val wGAN')
+        ]:
+            if key in history and len(history[key]) > 0:
+                plt.plot(history[key], label=label)
+        plt.xlabel('Epoch')
+        plt.ylabel('Weighted Components')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, 'loss_components_weighted.png'), dpi=150)
+        plt.close()
+    except Exception as e:
+        print(f"[Plot] Could not save loss_components_weighted.png: {e}")
 
 
 # -----------------------------
@@ -601,6 +649,7 @@ def main():
     parser.add_argument('--noise_sigma_range_norm', type=float, nargs=2, default=[0.001, 0.003], help='Gaussian noise sigma range on normalized [-1,1] image')
     parser.add_argument('--dose_factor_range', type=float, nargs=2, default=[0.25, 0.5], help='Dose factor range; noise scales ~ 1/sqrt(dose)')
     parser.add_argument('--antialias_clean', action='store_true', help='Use antialias in clean downsample')
+    parser.add_argument('--val_compute_gan', action='store_true', help='Wenn gesetzt, wird der GAN-Term in der Validierung mitberechnet und in Total/Komponenten eingerechnet.')
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -664,8 +713,10 @@ def main():
     scaler = torch_amp.GradScaler(enabled=use_cuda)
 
     history = {
-        'train_total': [], 'train_l1': [], 'train_perc': [], 'train_gan': [],
-        'val_total': [], 'val_l1': [], 'val_perc': [], 'val_gan': [],
+        'train_total': [], 'train_total_no_gan': [], 'train_l1': [], 'train_perc': [], 'train_gan': [],
+        'train_w_l1': [], 'train_w_perc': [], 'train_w_gan': [],
+        'val_total': [], 'val_total_no_gan': [], 'val_l1': [], 'val_perc': [], 'val_gan': [],
+        'val_w_l1': [], 'val_w_perc': [], 'val_w_gan': [],
         'val_psnr': [], 'val_mae': []
     }
     exp_name = f"rrdb_x{args.scale}_{args.degradation}"
@@ -748,7 +799,10 @@ def main():
     if not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['epoch','global_step','train_total','train_l1','train_perc','train_gan','val_total','val_l1','val_perc','val_gan','psnr','mae','lr','time_sec'])
+            writer.writerow(['epoch','global_step',
+                             'train_total','train_total_no_gan','train_l1','train_perc','train_gan','train_w_l1','train_w_perc','train_w_gan',
+                             'val_total','val_total_no_gan','val_l1','val_perc','val_gan','val_w_l1','val_w_perc','val_w_gan',
+                             'psnr','mae','lr','time_sec'])
 
     # Resume training if provided
     start_epoch = 1
@@ -816,9 +870,13 @@ def main():
             log_interval=100, warmup_g_only_iters=warmup_iters_remaining
         )
         history['train_total'].append(train_out['total'])
+        history['train_total_no_gan'].append(train_out['total_no_gan'])
         history['train_l1'].append(train_out['l1'])
         history['train_perc'].append(train_out['perc'])
         history['train_gan'].append(train_out['gan'])
+        history['train_w_l1'].append(train_out['w_l1'])
+        history['train_w_perc'].append(train_out['w_perc'])
+        history['train_w_gan'].append(train_out['w_gan'])
 
         # We can estimate how many iters happened
         iters_seen += len(train_loader)
@@ -831,14 +889,18 @@ def main():
         val_metrics = validate(ema.ema_model, val_loader, device,
                                perceptual_loss=perceptual, ragan=ragan, D=D,
                                lambda_pix=1.0, lambda_perc=args.lambda_perc, lambda_gan=args.lambda_gan,
-                               compute_gan=False)
+                               compute_gan=args.val_compute_gan)
         history['val_total'].append(val_metrics['Total'])
+        history['val_total_no_gan'].append(val_metrics['Total_NoGAN'])
         history['val_l1'].append(val_metrics['L1'])
         history['val_perc'].append(val_metrics['Perceptual'])
         history['val_gan'].append(val_metrics['GAN'])
-        history['val_psnr'].append(val_metrics['PSNR'])
-        history['val_mae'].append(val_metrics['MAE'])
-        print(f"[Val] Total={val_metrics['Total']:.6f} | L1={val_metrics['L1']:.6f} Perc={val_metrics['Perceptual']:.6f} GAN={val_metrics['GAN']:.6f} | PSNR={val_metrics['PSNR']:.4f} SSIM={val_metrics['SSIM']:.4f}")
+        history['val_w_l1'].append(val_metrics['W_L1'])
+        history['val_w_perc'].append(val_metrics['W_Perc'])
+        history['val_w_gan'].append(val_metrics['W_GAN'])
+        if not args.val_compute_gan and epoch == start_epoch:
+            print("[Val] GAN term disabled (use --val_compute_gan to enable).")
+        print(f"[Val] Total={val_metrics['Total']:.6f} | Total_NoGAN={val_metrics['Total_NoGAN']:.6f} | L1={val_metrics['L1']:.6f} Perc={val_metrics['Perceptual']:.6f} GAN={val_metrics['GAN']:.6f} | PSNR={val_metrics['PSNR']:.4f} SSIM={val_metrics['SSIM']:.4f}")
 
         elapsed = time.perf_counter() - t0
         current_lr = optimizer_g.param_groups[0]['lr']
@@ -847,8 +909,8 @@ def main():
                 writer = csv.writer(f)
                 writer.writerow([
                     epoch, iters_seen,
-                    f"{train_out['total']:.6f}", f"{train_out['l1']:.6f}", f"{train_out['perc']:.6f}", f"{train_out['gan']:.6f}",
-                    f"{val_metrics['Total']:.6f}", f"{val_metrics['L1']:.6f}", f"{val_metrics['Perceptual']:.6f}", f"{val_metrics['GAN']:.6f}",
+                    f"{train_out['total']:.6f}", f"{train_out['total_no_gan']:.6f}", f"{train_out['l1']:.6f}", f"{train_out['perc']:.6f}", f"{train_out['gan']:.6f}", f"{train_out['w_l1']:.6f}", f"{train_out['w_perc']:.6f}", f"{train_out['w_gan']:.6f}",
+                    f"{val_metrics['Total']:.6f}", f"{val_metrics['Total_NoGAN']:.6f}", f"{val_metrics['L1']:.6f}", f"{val_metrics['Perceptual']:.6f}", f"{val_metrics['GAN']:.6f}", f"{val_metrics['W_L1']:.6f}", f"{val_metrics['W_Perc']:.6f}", f"{val_metrics['W_GAN']:.6f}",
                     f"{val_metrics['PSNR']:.4f}", f"{val_metrics['MAE']:.6f}", f"{current_lr:.6f}", f"{elapsed:.2f}"
                 ])
         except Exception as e:
