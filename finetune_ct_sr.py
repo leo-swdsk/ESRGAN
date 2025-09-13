@@ -6,10 +6,11 @@ Defaults and rationale:
 - Perceptual loss (VGG19 conv5_4 pre-ReLU): lambda_perc = 0.10
 - Adversarial loss (Relativistic average GAN, RaGAN): lambda_gan = 0.005
 - Optimizer: Adam(lr=1e-4, betas=(0.9, 0.999), weight_decay=0)
-- Scheduler: MultiStepLR with milestones at 60% and 85% of total epochs (gamma=0.5)
+- Scheduler: MultiStepLR with milestones at 60% and 80% of total epochs (gamma=0.5)
 - AMP: torch.cuda.amp with GradScaler
 - EMA for generator weights with decay=0.999 (EMA used for validation/checkpointing)
 - Gradient clipping for both G and D with max_norm=1.0
+- Early stopping monitors Total_NoGAN by default (MAE/PSNR optional)
 
 Conservative weights (lambda_perc=0.10, lambda_gan=0.005) are chosen for medical CT
 to reduce hallucinations while still providing sharper textures than pure L1 training.
@@ -507,7 +508,8 @@ def save_checkpoint(out_dir: str,
                     *, metadata: dict = None,
                     ema_decay: float = 0.999,
                     best_psnr: float = None,
-                    best_mae: float = None):
+                    best_mae: float = None,
+                    best_total_no_gan: float = None):
     """Save checkpoint with complete training state (EMA/live, G/D, optimizers, schedulers, scaler)."""
     os.makedirs(out_dir, exist_ok=True)
 
@@ -525,6 +527,7 @@ def save_checkpoint(out_dir: str,
         'meta': metadata,
         'best_psnr': float(best_psnr) if best_psnr is not None else None,
         'best_mae': float(best_mae) if best_mae is not None else None,
+        'best_total_no_gan': float(best_total_no_gan) if best_total_no_gan is not None else None,
     }
     payload_ema = {
         **payload_common,
@@ -625,7 +628,7 @@ def main():
     parser = argparse.ArgumentParser(description='Finetune RRDB on CT with ESRGAN objectives (conservative)')
     parser.add_argument('--data_root', type=str, default='preprocessed_data', help='Root with patient subfolders (default: ESRGAN/preprocessed_data)')
     parser.add_argument('--scale', type=int, default=2, choices=[2,4])
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--patch', type=int, default=192)
     parser.add_argument('--pretrained_g', type=str, default='runs/rrdb_x2_blurnoise_20250909-145857/best.pth')
@@ -635,10 +638,10 @@ def main():
     parser.add_argument('--lambda_perc', type=float, default=0.10)
     parser.add_argument('--lambda_gan', type=float, default=0.005)
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--warmup_g_only', type=int, default=500, help='number of iterations to train G only at start')
+    parser.add_argument('--warmup_g_only', type=int, default=100, help='number of iterations to train G only at start')
     parser.add_argument('--split_json', type=str, default=None, help='Path to patient split JSON (from dump_patient_split.py)')
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience in epochs (None disables)')
-    parser.add_argument('--early_metric', type=str, default='mae', choices=['mae','psnr'], help='Metric to monitor for early stopping')
+    parser.add_argument('--early_metric', type=str, default='total_no_gan', choices=['mae','psnr','total_no_gan'], help='Metric to monitor for early stopping')
     # Degradation options
     parser.add_argument('--degradation', type=str, default='blurnoise', choices=['clean', 'blur', 'blurnoise'], help='Degradation pipeline for LR generation')
     parser.add_argument('--blur_sigma_range', type=float, nargs=2, default=None, help='Range [lo hi] of Gaussian blur sigma; if None, defaults by scale')
@@ -680,7 +683,7 @@ def main():
     optimizer_g = Adam(G.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0)
     optimizer_d = Adam(D.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0)
 
-    milestones = [max(1, int(args.epochs * 0.6)), max(2, int(args.epochs * 0.85))]
+    milestones = [max(1, int(args.epochs * 0.6)), max(2, int(args.epochs * 0.8))]
     scheduler_g = MultiStepLR(optimizer_g, milestones=milestones, gamma=0.5)
     scheduler_d = MultiStepLR(optimizer_d, milestones=milestones, gamma=0.5)
 
@@ -789,6 +792,7 @@ def main():
         print(f"[Meta] Could not write config: {e}")
     best_psnr = -1e9
     best_mae = 1e9
+    best_total_no_gan = float('inf')
     epochs_no_improve = 0
 
     # CSV metrics in run_dir
@@ -842,6 +846,11 @@ def main():
                 iters_seen = int(ckpt.get('global_step', 0))
                 best_psnr = float(ckpt.get('best_psnr', best_psnr))
                 best_mae = float(ckpt.get('best_mae', best_mae))
+                if 'best_total_no_gan' in ckpt and ckpt['best_total_no_gan'] is not None:
+                    try:
+                        best_total_no_gan = float(ckpt['best_total_no_gan'])
+                    except Exception:
+                        pass
                 print(f"[Resume] Resumed from {args.resume} at epoch={start_epoch} global_step={iters_seen}")
         except Exception as e:
             print(f"[Resume] Failed to load resume checkpoint: {e}")
@@ -921,6 +930,10 @@ def main():
         if val_metrics['MAE'] < best_mae - 1e-6:
             best_mae = val_metrics['MAE']
             improved = True
+        # also treat Total_NoGAN improvement as 'best' when monitored
+        if args.early_metric == 'total_no_gan' and val_metrics['Total_NoGAN'] < best_total_no_gan - 1e-12:
+            best_total_no_gan = float(val_metrics['Total_NoGAN'])
+            improved = True
         ckpt_dir = run_dir
         if improved:
             save_checkpoint(
@@ -929,7 +942,7 @@ def main():
                 scheduler_g, scheduler_d,
                 epoch, iters_seen,
                 tag='best', metadata=meta, ema_decay=ema.decay,
-                best_psnr=best_psnr, best_mae=best_mae
+                best_psnr=best_psnr, best_mae=best_mae, best_total_no_gan=best_total_no_gan
             )
         save_checkpoint(
             ckpt_dir, ema.ema_model, G, D,
@@ -937,20 +950,29 @@ def main():
             scheduler_g, scheduler_d,
             epoch, iters_seen,
             tag='last', metadata=meta, ema_decay=ema.decay,
-            best_psnr=best_psnr, best_mae=best_mae
+            best_psnr=best_psnr, best_mae=best_mae, best_total_no_gan=best_total_no_gan
         )
 
         # Early stopping on selected metric
         if args.patience is not None:
-            if args.early_metric == 'mae':
+            monitored = args.early_metric
+            if monitored == 'mae':
                 had_improve = (val_metrics['MAE'] <= best_mae + 1e-6)
-            else:
+                best_val_str = f"best_mae={best_mae:.6f}"
+            elif monitored == 'psnr':
                 had_improve = (val_metrics['PSNR'] >= best_psnr - 1e-6)
+                best_val_str = f"best_psnr={best_psnr:.4f}"
+            else:  # total_no_gan
+                had_improve = (val_metrics['Total_NoGAN'] < best_total_no_gan - 1e-12)
+                if had_improve:
+                    best_total_no_gan = float(val_metrics['Total_NoGAN'])
+                best_val_str = f"best_total_no_gan={best_total_no_gan:.6f}"
+
             if had_improve:
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-                print(f"[EarlyStop] No improvement for {epochs_no_improve}/{args.patience} epochs on {args.early_metric.upper()}")
+                print(f"[EarlyStop] No improvement for {epochs_no_improve}/{args.patience} epochs on {monitored} ({best_val_str})")
                 if epochs_no_improve >= args.patience:
                     print("[EarlyStop] Patience reached. Stopping training early.")
                     break
