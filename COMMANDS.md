@@ -122,6 +122,17 @@ python evaluate_ct_model.py --root "preprocessed_data" --split test --model_path
 python visualize_lr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN\preprocessed_data\15041pp" --preset soft_tissue --degradation blurnoise --dose_factor_range 0.25 0.5
 ```
 
+### Modellgröße und Rechenaufwand (Parameter, MACs/FLOPs)
+- Parameter zählen (nur Architektur):
+```bash
+python count_model_params.py --scale 2
+```
+- Parameter zählen nach Laden eines Checkpoints und Rechenaufwand für eine LR‑Eingabe (z. B. 128×128):
+```bash
+python count_model_params.py --scale 2 --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" --profile --input_size 128 128
+```
+- Hinweis: Für MACs/FLOPs wird bevorzugt `thop` genutzt, alternativ `ptflops`. Falls nicht installiert, wird der Aufwand als N/A angezeigt.
+
 #### Viewer – identisch zur Evaluation (per summary.json)
 - Nutzt die per Patient in der Evaluation gezogenen Degradationswerte aus `summary.json` und erzwingt sie als Punktintervalle.
 - Ergebnis: Die Viewer-Metriken pro Slice entsprechen den CSV-Werten (bei gleicher Fensterung, z. B. `--preset global`).
