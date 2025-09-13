@@ -137,12 +137,7 @@ python count_model_params.py --scale 2 --model_path "runs\rrdb_x2_blurnoise_2025
 - Nutzt die per Patient in der Evaluation gezogenen Degradationswerte aus `summary.json` und erzwingt sie als Punktintervalle.
 - Ergebnis: Die Viewer-Metriken pro Slice entsprechen den CSV-Werten (bei gleicher Fensterung, z. B. `--preset global`).
 ```bash
-python visualize_lr_sr_hr.py \
-  --dicom_folder "preprocessed_data\14655pp" \
-  --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" \
-  --device cuda --scale 2 --preset global \
-  --degradation blurnoise --degradation_sampling volume --deg_seed_mode per_patient --deg_seed 42 \
-  --eval_summary "eval_results\test__best__globalHU_-1000_2000_on_test_set__YYYYMMDD-HHMMSS\summary.json"
+python visualize_lr_sr_hr.py --dicom_folder "preprocessed_data\14655pp" --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" --device cuda --scale 2 --preset global --degradation blurnoise --degradation_sampling volume --deg_seed_mode per_patient --deg_seed 42 --eval_summary "eval_results\test__best__globalHU_-1000_2000_on_test_set__YYYYMMDD-HHMMSS\summary.json"
 ```
 - Hinweise:
   - `--eval_summary` entnimmt aus `patient_to_degradation_sampled` die Werte für den angegebenen Patienten und setzt `sigma`, `kernel`, `noise_sigma`, `dose` fix.
@@ -160,15 +155,9 @@ python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\ESR
 ue
 ```
 
-- LR vs SR vs HR (SR via Modell, interaktiv), ABER MIT DEM FINETUNING-MODELL
-```bash
-python visualize_lr_sr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\data\manifest-1724965242274\Spine-Mets-CT-SEG\15041" --model_path finetune_outputs\best.pth --device cuda --preset soft_tissue --degradation blurnoise
+
 ```
 
-- LR vs SR vs HR (mit besonders kleinem Datensatz 49 Slices)
-```bash
-python visualize_lr_sr_hr.py --dicom_folder "C:\AA_Leonard\A_Studium\Bachelorarbeit Superresolution\ESRGAN-Med\data\klein" --model_path rrdb_ct_best.pth --device cuda --preset soft_tissue
-```
 
 - Patientenaufteilung ansehen (Metadaten: Zuordnung zur Gruppe, Id, Anzahl der Slices, MOdalität und Gerät, Schichtdicke und Pixel-Spacing), wichtig: gleichen Seed beachten:
 ```bash
@@ -247,7 +236,7 @@ Standard: `--degradation blurnoise`. Ziel ist die realistischere Simulation eine
     - `det-slice`: Deterministisch je Slice basierend auf `deg_seed + slice_index`
   - `--deg_seed INT` (Default: `42`) – Seed für per-volume bzw. det-slice
 
-- Empfohlene Nutzung zur Reproduzierbarkeit (immer mit `finetune_outputs\best.pth`):
+
 
 ```bash
 # Evaluation – per-volume Sampling, reproduzierbar

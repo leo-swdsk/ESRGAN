@@ -928,8 +928,37 @@ def main():
                 summ = json.load(f)
             # patient id was parsed from dicoms above
             p2s = summ.get('patient_to_degradation_sampled') or {}
-            # fallback to deg_seeds map for verification only
-            enforced_params = p2s.get(patient_id)
+            # Try multiple candidate keys to match evaluation patient identifiers
+            base_folder = os.path.basename(args.dicom_folder.rstrip('/\\'))
+            candidates = []
+            # direct PatientID as in DICOM
+            if isinstance(patient_id, str) and len(patient_id) > 0:
+                candidates.append(patient_id)
+                # common suffix used in preprocessed folders
+                if not patient_id.endswith('pp'):
+                    candidates.append(patient_id + 'pp')
+                else:
+                    candidates.append(patient_id[:-2])
+            # base folder name (e.g., 14655pp)
+            if isinstance(base_folder, str) and len(base_folder) > 0:
+                candidates.append(base_folder)
+                if base_folder.endswith('pp'):
+                    candidates.append(base_folder[:-2])
+                else:
+                    candidates.append(base_folder + 'pp')
+            # deduplicate preserving order
+            seen = set()
+            candidates = [c for c in candidates if (c not in seen and not seen.add(c))]
+            matched_key = None
+            for key in candidates:
+                if key in p2s:
+                    matched_key = key
+                    enforced_params = p2s[key]
+                    break
+            if matched_key is None:
+                print(f"[Vis] No match in eval summary for candidates={candidates}; falling back to sampling.")
+            else:
+                print(f"[Vis] Using sampled degradation from eval summary for key={matched_key}: {enforced_params}")
             if enforced_params:
                 print(f"[Vis] Using sampled degradation from eval summary for patient={patient_id}: {enforced_params}")
                 # Enforce as point intervals
