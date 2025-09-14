@@ -3,8 +3,8 @@ Finetune RRDBNet (1->1 channel) on CT data with ESRGAN-style objectives.
 
 Defaults and rationale:
 - Pixel loss (L1): lambda_pix = 1.0
-- Perceptual loss (VGG19 conv5_4 pre-ReLU): lambda_perc = 0.10
-- Adversarial loss (Relativistic average GAN, RaGAN): lambda_gan = 0.005
+- Perceptual loss (VGG19 conv5_4 pre-ReLU): lambda_perc = 0.08
+- Adversarial loss (Relativistic average GAN, RaGAN): lambda_gan = 0.03
 - Optimizer: Adam(lr=1e-4, betas=(0.9, 0.999), weight_decay=0)
 - Scheduler: MultiStepLR with milestones at 60% and 80% of total epochs (gamma=0.5)
 - AMP: torch.cuda.amp with GradScaler
@@ -12,7 +12,7 @@ Defaults and rationale:
 - Gradient clipping for both G and D with max_norm=1.0
 - Early stopping monitors Total_NoGAN by default (MAE/PSNR optional)
 
-Conservative weights (lambda_perc=0.10, lambda_gan=0.005) are chosen for medical CT
+Conservative weights (lambda_perc=0.08, lambda_gan=0.03) are chosen for medical CT
 to reduce hallucinations while still providing sharper textures than pure L1 training.
 This prioritizes metric-faithful reconstructions (L1/PSNR/SSIM) over aggressively
 hallucinated details.
@@ -629,14 +629,14 @@ def main():
     parser.add_argument('--data_root', type=str, default='preprocessed_data', help='Root with patient subfolders (default: ESRGAN/preprocessed_data)')
     parser.add_argument('--scale', type=int, default=2, choices=[2,4])
     parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=10)
     parser.add_argument('--patch', type=int, default=192)
     parser.add_argument('--pretrained_g', type=str, default='runs/rrdb_x2_blurnoise_20250909-145857/best.pth')
     # removed out_dir (not used for new artifacts)
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint (ema/live) to resume training')
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--lambda_perc', type=float, default=0.10)
-    parser.add_argument('--lambda_gan', type=float, default=0.005)
+    parser.add_argument('--lambda_perc', type=float, default=0.08)
+    parser.add_argument('--lambda_gan', type=float, default=0.03)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--warmup_g_only', type=int, default=100, help='number of iterations to train G only at start')
     parser.add_argument('--split_json', type=str, default=None, help='Path to patient split JSON (from dump_patient_split.py)')
@@ -795,6 +795,29 @@ def main():
     best_total_no_gan = float('inf')
     epochs_no_improve = 0
 
+    # Central monitor configuration for early metric
+    metric_cfg = {
+        'mae':         {'key': 'MAE',         'mode': 'min', 'eps': 1e-8},
+        'psnr':        {'key': 'PSNR',        'mode': 'max', 'eps': 1e-6},
+        'total_no_gan':{'key': 'Total_NoGAN', 'mode': 'min', 'eps': 1e-9},
+    }
+    mon = metric_cfg[args.early_metric]
+    monitor_key, mode, eps = mon['key'], mon['mode'], mon['eps']
+
+    def is_improved(curr: float, best: float, mode: str, eps: float) -> bool:
+        if mode == 'min':
+            return curr < (best - eps)
+        else:
+            return curr > (best + eps)
+
+    def get_best_for_early_metric():
+        if args.early_metric == 'mae':
+            return best_mae
+        elif args.early_metric == 'psnr':
+            return best_psnr
+        else:
+            return best_total_no_gan
+
     # CSV metrics in run_dir
     csv_path = os.path.join(run_dir, 'metrics.csv')
     if not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
@@ -922,22 +945,21 @@ def main():
         except Exception as e:
             print(f"[CSV] Could not append metrics: {e}")
 
-        # Checkpoints
-        improved = False
-        if val_metrics['PSNR'] > best_psnr + 1e-6:
-            best_psnr = val_metrics['PSNR']
-            improved = True
-        if val_metrics['MAE'] < best_mae - 1e-6:
-            best_mae = val_metrics['MAE']
-            improved = True
-        # also treat Total_NoGAN improvement as 'best' when monitored
-        if args.early_metric == 'total_no_gan' and val_metrics['Total_NoGAN'] < best_total_no_gan - 1e-12:
-            best_total_no_gan = float(val_metrics['Total_NoGAN'])
-            improved = True
-        ckpt_dir = run_dir
-        if improved:
+        # Monitoring & Checkpoints controlled only by selected early metric
+        curr = float(val_metrics[monitor_key])
+        best_curr = float(get_best_for_early_metric())
+        improved_early = is_improved(curr, best_curr, mode, eps)
+        print(f"[Monitor] early_metric={args.early_metric} curr={curr:.6f} best={best_curr:.6f} delta={(curr-best_curr):+.6f} mode={mode}")
+
+        if improved_early:
+            if args.early_metric == 'mae':
+                best_mae = curr
+            elif args.early_metric == 'psnr':
+                best_psnr = curr
+            else:
+                best_total_no_gan = curr
             save_checkpoint(
-                ckpt_dir, ema.ema_model, G, D,
+                run_dir, ema.ema_model, G, D,
                 optimizer_g, optimizer_d, scaler,
                 scheduler_g, scheduler_d,
                 epoch, iters_seen,
@@ -945,7 +967,7 @@ def main():
                 best_psnr=best_psnr, best_mae=best_mae, best_total_no_gan=best_total_no_gan
             )
         save_checkpoint(
-            ckpt_dir, ema.ema_model, G, D,
+            run_dir, ema.ema_model, G, D,
             optimizer_g, optimizer_d, scaler,
             scheduler_g, scheduler_d,
             epoch, iters_seen,
@@ -953,26 +975,13 @@ def main():
             best_psnr=best_psnr, best_mae=best_mae, best_total_no_gan=best_total_no_gan
         )
 
-        # Early stopping on selected metric
+        # Early stopping uses the same improvement decision
         if args.patience is not None:
-            monitored = args.early_metric
-            if monitored == 'mae':
-                had_improve = (val_metrics['MAE'] <= best_mae + 1e-6)
-                best_val_str = f"best_mae={best_mae:.6f}"
-            elif monitored == 'psnr':
-                had_improve = (val_metrics['PSNR'] >= best_psnr - 1e-6)
-                best_val_str = f"best_psnr={best_psnr:.4f}"
-            else:  # total_no_gan
-                had_improve = (val_metrics['Total_NoGAN'] < best_total_no_gan - 1e-12)
-                if had_improve:
-                    best_total_no_gan = float(val_metrics['Total_NoGAN'])
-                best_val_str = f"best_total_no_gan={best_total_no_gan:.6f}"
-
-            if had_improve:
+            if improved_early:
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-                print(f"[EarlyStop] No improvement for {epochs_no_improve}/{args.patience} epochs on {monitored} ({best_val_str})")
+                print(f"[EarlyStop] No improvement for {epochs_no_improve}/{args.patience} epochs on {args.early_metric}")
                 if epochs_no_improve >= args.patience:
                     print("[EarlyStop] Patience reached. Stopping training early.")
                     break
