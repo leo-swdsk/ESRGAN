@@ -4,7 +4,7 @@ Finetune RRDBNet (1->1 channel) on CT data with ESRGAN-style objectives.
 Defaults and rationale:
 - Pixel loss (L1): lambda_pix = 1.0
 - Perceptual loss (VGG19 conv5_4 pre-ReLU): lambda_perc = 0.08
-- Adversarial loss (Relativistic average GAN, RaGAN): lambda_gan = 0.03
+- Adversarial loss (Relativistic average GAN, RaGAN): lambda_gan = 0.003
 - Optimizer: Adam(lr=1e-4, betas=(0.9, 0.999), weight_decay=0)
 - Scheduler: MultiStepLR with milestones at 60% and 80% of total epochs (gamma=0.5)
 - AMP: torch.cuda.amp with GradScaler
@@ -12,7 +12,7 @@ Defaults and rationale:
 - Gradient clipping for both G and D with max_norm=1.0
 - Early stopping monitors Total_NoGAN by default (MAE/PSNR optional)
 
-Conservative weights (lambda_perc=0.08, lambda_gan=0.03) are chosen for medical CT
+Conservative weights (lambda_perc=0.08, lambda_gan=0.003) are chosen for medical CT
 to reduce hallucinations while still providing sharper textures than pure L1 training.
 This prioritizes metric-faithful reconstructions (L1/PSNR/SSIM) over aggressively
 hallucinated details.
@@ -636,7 +636,7 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint (ema/live) to resume training')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--lambda_perc', type=float, default=0.08)
-    parser.add_argument('--lambda_gan', type=float, default=0.03)
+    parser.add_argument('--lambda_gan', type=float, default=0.003)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--warmup_g_only', type=int, default=100, help='number of iterations to train G only at start')
     parser.add_argument('--split_json', type=str, default=None, help='Path to patient split JSON (from dump_patient_split.py)')
