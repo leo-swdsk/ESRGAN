@@ -108,6 +108,11 @@ Hier für das Feintuning-Skript:
 python evaluate_ct_model.py --root "preprocessed_data" --split test --model_path "runs\finetune_x2_blurnoise_20250914-093436\best.pth"
 ```
 
+Jetzt nicht mehr global, sondern auf klinisch wichtiger Fensterung
+```bash
+python evaluate_ct_model.py --root "preprocessed_data" --split test --model_path "runs\finetune_x2_blurnoise_20250914-093436\best.pth" --preset soft_tissue
+```
+
  Unterschied: seed vs. deg_seed
  - seed: steuert die allgemeine Auswahllogik, z. B. die Zufallsauswahl von Slices, falls du Limits setzt oder slice_sampling=random nutzt. Hat keinen Effekt, wenn alle Slices ausgewertet werden und keine weitere zufällige Auswahl nötig ist.
  - deg_seed: steuert ausschließlich die Zufallsziehung der Degradationsparameter (Blur/Noise) für die LR-Erzeugung. In Kombination mit --degradation_sampling (z. B. volume oder det-slice) sorgt er für reproduzierbare Blur-/Noise-Samples.

@@ -13,6 +13,7 @@ from rrdb_ct_model import RRDBNet_CT
 from seed_utils import fixed_seed_for_path
 from ct_dataset_loader import CT_Dataset_SR
 from ct_sr_evaluation import compare_methods
+from window_presets import WINDOW_PRESETS
 
 
 def _default_blur_sigma_range_for_scale(scale: int):
@@ -109,6 +110,13 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
     if isinstance(preset, str) and len(preset) > 0:
         metrics_mode = 'window'
         metrics_tag = f"preset-{preset}"
+        # If WL/WW not provided, derive from preset
+        if (window_center is None or window_width is None) and preset in WINDOW_PRESETS:
+            try:
+                window_center = float(WINDOW_PRESETS[preset]['center'])
+                window_width = float(WINDOW_PRESETS[preset]['width'])
+            except Exception:
+                pass
     elif window_center is not None and window_width is not None:
         metrics_mode = 'window'
         metrics_tag = f"wlww_{int(window_center)}_{int(window_width)}"
@@ -120,6 +128,8 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
         except Exception:
             metrics_tag = "globalHU"
     eval_config['metrics']['mode'] = metrics_mode
+    eval_config['metrics']['window_center'] = window_center
+    eval_config['metrics']['window_width'] = window_width
 
     # Output run directory and short artifact names
     model_tag = os.path.splitext(os.path.basename(model_path))[0]
