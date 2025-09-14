@@ -233,6 +233,10 @@ class ViewerLRSRHR:
         self.antialias_clean = bool(antialias_clean)
         self.degradation_sampling = degradation_sampling
         self.deg_seed = deg_seed
+        # effective degradation parameters (filled by caller; used for display only)
+        self.used_sigma = None
+        self.used_noise_sigma = None
+        self.used_dose = None
         # track current windowing
         cfg = WINDOW_PRESETS.get(self.preset_name, WINDOW_PRESETS['default'])
         self.curr_wl = float(cfg['center'])
@@ -458,6 +462,22 @@ class ViewerLRSRHR:
                             deg_items.append(f"dose=[{float(self.dose_factor_range[0]):.2f},{float(self.dose_factor_range[1]):.2f}]")
                         except Exception:
                             pass
+                # Also show effectively used sampled values (if available)
+                try:
+                    if self.used_sigma is not None:
+                        deg_items.append(f"used_sigma={float(self.used_sigma):.4f}")
+                except Exception:
+                    pass
+                try:
+                    if self.used_noise_sigma is not None:
+                        deg_items.append(f"used_noise_sigma={float(self.used_noise_sigma):.4f}")
+                except Exception:
+                    pass
+                try:
+                    if self.used_dose is not None:
+                        deg_items.append(f"used_dose={float(self.used_dose):.3f}")
+                except Exception:
+                    pass
                 if self.degradation == 'clean' and self.antialias_clean:
                     deg_items.append("AA")
                 if self.degradation_sampling:
@@ -1049,6 +1069,18 @@ def main():
         degradation_sampling=args.degradation_sampling,
         deg_seed=used_seed,
     )
+    # pass effective used degradation values to the viewer for display only
+    try:
+        viewer.used_sigma = used_deg.get('blur_sigma')
+        viewer.used_noise_sigma = used_deg.get('noise_sigma')
+        viewer.used_dose = used_deg.get('dose')
+        # refresh info panel to include used_* values immediately
+        try:
+            viewer.update()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     print('Navigation: Mouse wheel or arrow keys to navigate slices')
     print('Keyboard shortcuts: Home (inferior), End (superior), Arrow keys (previous/next)')
