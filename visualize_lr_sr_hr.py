@@ -268,7 +268,8 @@ class ViewerLRSRHR:
         self.im_bic = None
         self.im_sr = None
         self.im_hr = None
-        self.text = self.fig.text(0.5, 0.02, '', ha='center', va='bottom')
+        # move index counter further right to avoid overlap with Index/Go controls
+        self.text = self.fig.text(0.70, 0.02, '', ha='center', va='bottom')
         self.text_stats = self.fig.text(0.5, 0.97, '', ha='center', va='top')
         # info top, metrics will be placed below with spacing
         self.text_info = self.fig.text(0.02, 0.995, '', ha='left', va='top', family='monospace')
@@ -315,6 +316,21 @@ class ViewerLRSRHR:
             except Exception as e:
                 print(f"[Apply WW] Invalid WL/WW input: {e}")
         self.btn_apply.on_clicked(apply_manual)
+        # Index selection (text field + button)
+        ax_idx = self.fig.add_axes([0.47, 0.02, 0.08, 0.05])
+        self.txt_idx = TextBox(ax_idx, 'Index', initial=str(self.index))
+        ax_idx_go = self.fig.add_axes([0.57, 0.02, 0.06, 0.05])
+        self.btn_idx_go = Button(ax_idx_go, 'Go')
+        def apply_index(event):
+            try:
+                val = int(float(self.txt_idx.text))
+                D, _, _, _ = self.hr.shape
+                val = int(np.clip(val, 0, max(0, D - 1)))
+                self.index = val
+                self.update()
+            except Exception as e:
+                print(f"[Apply Index] Invalid index: {e}")
+        self.btn_idx_go.on_clicked(apply_index)
         print('[Hint] Navigation: Mouse wheel or arrow keys (Up=superior, Down=inferior, Left=previous, Right=next); Home=inferior, End=superior; Drag on HR to select ROI; press r to reset ROI; change presets or set WL/WW and click Apply')
         # sync to toolbar zoom/pan on all axes
         for ax in [self.ax_hr, self.ax_sr, self.ax_lin, self.ax_bic, self.ax_lr]:
