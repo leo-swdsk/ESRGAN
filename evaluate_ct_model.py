@@ -54,7 +54,7 @@ def evaluate_split(root_folder, split_name, model_path, output_dir, device='cuda
                    hu_clip=(-1000, 2000), preset=None, window_center=None, window_width=None,
                    max_patients=None, max_slices_per_patient=None, slice_sampling='random', seed=42,
                    degradation='blurnoise', blur_sigma_range=None, blur_kernel=None,
-                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True,
+                   noise_sigma_range_norm=(0.001, 0.003), dose_factor_range=(0.25, 0.5), antialias_clean=True, # antialias still disabled for blur and blurnoise
                    degradation_sampling='volume', deg_seed=42, deg_seed_mode='per_patient'):
     ensure_dir(output_dir)
 

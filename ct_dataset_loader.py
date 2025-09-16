@@ -314,7 +314,7 @@ class CT_Dataset_SR(Dataset):
             noise_np = rng_noise.normal(loc=0.0, scale=noise_eff, size=lr.shape,)
             noise_t = torch.as_tensor(noise_np, device=lr.device, dtype=lr.dtype)
             lr = lr + noise_t
-            lr = torch.clamp(lr, -1.0, 1.0)
+            lr = torch.clamp(lr, -1.0, 1.0) # clamp to [-1,1]
 
         # one-time log of actual parameters used
         if not self._deg_logged:
