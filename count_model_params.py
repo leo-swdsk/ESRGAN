@@ -42,7 +42,7 @@ def main():
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (matches model)')
     parser.add_argument('--model_path', type=str, default=None, help='Optional path to .pth to load before counting')
     parser.add_argument('--profile', action='store_true', help='Also estimate MACs/FLOPs using a dummy LR input')
-    parser.add_argument('--input_size', type=int, nargs=2, default=[128, 128], help='LR input size [H W] for MACs/FLOPs (before upscaling)')
+    parser.add_argument('--input_size', type=int, nargs=2, default=[256, 256], help='LR input size [H W] for MACs/FLOPs (before upscaling)')
     args = parser.parse_args()
 
     model = load_model(args.scale, args.model_path)

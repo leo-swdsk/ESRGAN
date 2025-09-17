@@ -137,9 +137,9 @@ python visualize_lr_hr.py --dicom_folder "C:\BachelorarbeitLeo\ESRGAN-Med\ESRGAN
 ```bash
 python count_model_params.py --scale 2
 ```
-- Parameter zählen nach Laden eines Checkpoints und Rechenaufwand für eine LR‑Eingabe (z. B. 128×128):
+- Parameter zählen nach Laden eines Checkpoints und Rechenaufwand für eine LR‑Eingabe (z. B. 256x256):
 ```bash
-python count_model_params.py --scale 2 --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" --profile --input_size 128 128
+python count_model_params.py --scale 2 --model_path "runs\rrdb_x2_blurnoise_20250912-114004\best.pth" --profile --input_size 256 256
 ```
 - Hinweis: Für MACs/FLOPs wird bevorzugt `thop` genutzt, alternativ `ptflops`. Falls nicht installiert, wird der Aufwand als N/A angezeigt.
 
