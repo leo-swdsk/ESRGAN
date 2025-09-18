@@ -905,7 +905,7 @@ def main():
     parser = argparse.ArgumentParser(description='Visualize LR vs SR vs HR CT slices with mouse-wheel scrolling')
     parser.add_argument('--dicom_folder', type=str, required=True, help='Root folder containing DICOM series')
     parser.add_argument('--preset', type=str, default='soft_tissue', help='Window preset')
-    parser.add_argument('--model_path', type=str, default='finetune_outputs/best.pth', help='Path to trained model weights')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to trained model weights')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
     parser.add_argument('--sr_batch', type=int, default=20, help='Batch size for batched SR inference (speed up GUI)')

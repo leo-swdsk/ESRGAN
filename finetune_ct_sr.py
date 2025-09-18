@@ -631,7 +631,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=10)
     parser.add_argument('--patch', type=int, default=192)
-    parser.add_argument('--pretrained_g', type=str, default='runs/rrdb_x2_blurnoise_20250909-145857/best.pth')
+    parser.add_argument('--pretrained_g', type=str, required=True)
     # removed out_dir (not used for new artifacts)
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint (ema/live) to resume training')
     parser.add_argument('--lr', type=float, default=1e-4)

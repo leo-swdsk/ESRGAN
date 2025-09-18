@@ -592,7 +592,7 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate CT SR model with aggregated metrics and summaries')
     parser.add_argument('--root', type=str, required=True, help='Root folder containing patient subfolders (same as training root)')
     parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'], help='Which split to evaluate')
-    parser.add_argument('--model_path', type=str, default='runs/rrdb_x2_blurnoise_20250909-145857/best.pth', help='Path to trained model weights')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to trained model weights')
     parser.add_argument('--output_dir', type=str, default='eval_results', help='Directory to write CSV/JSON outputs')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
     parser.add_argument('--scale', type=int, default=2, help='Upsampling scale (must match model)')
