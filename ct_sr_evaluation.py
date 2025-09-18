@@ -5,7 +5,6 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import mean_squared_error
 import math
-import warnings
 from metrics_core import compute_all_metrics
 
 # Optional metrics: LPIPS (full-reference) and Perceptual Index (PI = 0.5*((10-Ma)+NIQE))
@@ -156,11 +155,11 @@ def _compute_pi_with_components(grayscale_tensor_m1_1):
     Input: [1,H,W] in [-1,1]  (ein Slice, 1 Kanal)
     Return: (PI, MA, NIQE)
     """
-    # Ziel-Device nach Verfügbarkeit
+    # target device after availability
     target_device = grayscale_tensor_m1_1.device if grayscale_tensor_m1_1.is_cuda else torch.device('cpu')
     piqa_niqe, piqa_ma = _ensure_pi_metrics(target_device)
 
-    # [-1,1] -> [0,1], robust auf Dimensionen
+    # [-1,1] -> [0,1], robust against dimensions
     x = grayscale_tensor_m1_1.detach().to(torch.float32)
     if x.ndim == 2:           # [H,W] -> [1,H,W]
         x = x.unsqueeze(0)
@@ -172,7 +171,7 @@ def _compute_pi_with_components(grayscale_tensor_m1_1):
     ma_val   = float('nan')
 
     try:
-        # -------- NIQE (1ch, Originalgröße; <96 px sanft hochskalieren) --------
+        # -------- NIQE (1ch, Original size; <96 px softly upscale) --------
         if piqa_niqe is not None:
             H, W = x01.shape[-2:]
             if min(H, W) < 96:
@@ -188,7 +187,7 @@ def _compute_pi_with_components(grayscale_tensor_m1_1):
                 niqe_val = float(piqa_niqe(x_niqe.to(dev_niqe)).item())
 
         elif _skimage_niqe is not None:
-            # skimage erwartet 2D [H,W] float in [0,1]
+            # skimage expects 2D [H,W] float in [0,1]
             niqe_val = float(_skimage_niqe(x01.squeeze(0).squeeze(0).cpu().numpy().astype('float64')))
 
     except Exception as e:

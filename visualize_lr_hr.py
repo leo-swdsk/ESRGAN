@@ -4,11 +4,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import pydicom
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 
 from window_presets import WINDOW_PRESETS
-from ct_dataset_loader import is_ct_image_dicom
+
 
 
 def _gaussian_kernel_2d(sigma: float, kernel_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -73,8 +72,6 @@ def degrade_hr_to_lr(hr_volume: torch.Tensor, scale: int, *, degradation: str = 
         lr = torch.clamp(lr + noise_t, -1.0, 1.0)
     return lr
 
-
-from windowing import apply_window
 
 
 def load_ct_volume(folder_path, preset="soft_tissue"):

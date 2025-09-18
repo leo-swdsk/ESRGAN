@@ -7,13 +7,13 @@ from datetime import datetime, timezone
 import torch
 import pydicom
 
-from evaluate_ct_model import split_patients, get_patient_dirs
+from evaluate_ct_model import split_patients
 from ct_dataset_loader import is_ct_image_dicom
 
 try:
     UTC = datetime.UTC          # Python 3.11+
 except AttributeError:
-    UTC = timezone.utc          # ältere Python-Versionen
+    UTC = timezone.utc          # older Python versions
 
 
 def count_ct_slices_silent(patient_dir):

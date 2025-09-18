@@ -58,9 +58,9 @@ class RRDBNet_CT(nn.Module):
         self.conv_last = nn.Conv2d(nf, out_nc, 3, 1, 1)
 
     def forward(self, x):
-        fea = self.conv_first(x) #Eingangsfeatures (64 Kanäle)
-        trunk = self.trunk_conv(self.RRDB_trunk(fea)) #durch die RRDB-Blöcke
+        fea = self.conv_first(x) #input features (64 channels)
+        trunk = self.trunk_conv(self.RRDB_trunk(fea)) #through the RRDB-Blocks
         fea = fea + trunk #Skip-Connection
         out = self.upsampler(fea) #Upsampling
-        out = self.conv_last(out) #zurück zu 1 Kanal (CT)
+        out = self.conv_last(out) #back to 1 channel (CT)
         return out

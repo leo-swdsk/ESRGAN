@@ -9,7 +9,7 @@ import numpy as np
 from typing import Literal
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 from downsample_tensor_volume import downsample_tensor
-from windowing import apply_window
+
 
 #Loading whole slices is usually not worth it and fills the memory unnecessarily, so smaller random patches
 def random_aligned_crop(hr_tensor, *, hr_patch: int, scale: int, seed: int):

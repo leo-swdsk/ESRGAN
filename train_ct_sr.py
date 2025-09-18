@@ -19,16 +19,16 @@ from torch import amp
 import hashlib
 import random
 
-#AMP (Automatic Mixed Precision) wird genutzt --> Operationen laufen intern in float16 und nicht 32, was Speicher spart
+#AMP (Automatic Mixed Precision) is used --> Operations run internally in float16 and not 32, which saves memory
 def validate(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
     use_cuda = (device.type == 'cuda')
     with torch.no_grad():
         for lr_imgs, hr_imgs in dataloader:
-            lr_imgs = lr_imgs.to(device, non_blocking=True) # Pytorch kann Transfer asynchron starten-->während die GPU noch rechnet, kann schon der nächste Batch kopiert werde 
+            lr_imgs = lr_imgs.to(device, non_blocking=True) # Pytorch can start transfer asynchronously-->while the GPU is still computing, the next batch can be copied 
             hr_imgs = hr_imgs.to(device, non_blocking=True)
-            with amp.autocast('cuda', enabled=use_cuda): #Tensor Cores rechnen in float16
+            with amp.autocast('cuda', enabled=use_cuda): #Tensor Cores compute in float16
                 preds = model(lr_imgs)
                 loss = criterion(preds, hr_imgs)
             total_loss += loss.item()
@@ -52,13 +52,13 @@ class _Tee:
         self._fh.flush()
 
 
-# Trainingsfunktion
+# Training function
 def train_sr_model(model, train_loader, val_loader, num_epochs=20, lr=1e-4, patience=5,
                    run_dir=None, resume_path=None, *, metadata: dict = None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Train] Device: {device}")
     model = model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr) # Betas: 0.9, 0.999 (voreingestellter Standard)
+    optimizer = optim.Adam(model.parameters(), lr=lr) # Betas: 0.9, 0.999 (default)
     criterion = nn.L1Loss()  
     use_cuda = (device.type == 'cuda')
 

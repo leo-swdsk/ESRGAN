@@ -922,7 +922,7 @@ def main():
     parser.add_argument('--eval_summary', type=str, default=None, help='Optional path to evaluation summary.json to reuse per-patient sampled degradation params')
     args = parser.parse_args()
 
-    # ---------- Modell ----------
+    # ---------- model ----------
     device = torch.device(args.device if torch.cuda.is_available() and args.device == 'cuda' else 'cpu')
     model = RRDBNet_CT(scale=args.scale).to(device)
     state = torch.load(args.model_path, map_location=device)

@@ -5,22 +5,22 @@ import datetime
 
 def tensor_to_dicom(tensor, ref_dicom_path, output_path, window_center=40, window_width=400):
     """
-    tensor: 2D-Tensor mit Shape [1, H, W] (float in [-1, 1])
-    ref_dicom_path: Original-DICOM, das als Vorlage dient
-    output_path: Speicherort für neue DICOM
+    tensor: 2D-Tensor with shape [1, H, W] (float in [-1, 1])
+    ref_dicom_path: Original-DICOM, that serves as template
+    output_path: Storage location for new DICOM
     """
 
-    # 1. Denormalisieren auf HU-Fenster
+    # 1. Denormalize to HU window
     min_hu = window_center - window_width / 2
     max_hu = window_center + window_width / 2
     np_img = tensor.squeeze(0).cpu().numpy()  # [H, W]
     np_img = (np_img + 1) / 2  # [-1,1] → [0,1]
     np_img = np_img * (max_hu - min_hu) + min_hu  # → HU
 
-    # 2. Optional: cast to int16 (DICOM-typisch)
+    # 2. Optional: cast to int16 (DICOM-typical)
     np_img = np.clip(np_img, -1024, 3071).astype(np.int16)
 
-    # 3. DICOM-Vorlage laden und kopieren
+    # 3. Load DICOM template and copy
     ref = pydicom.dcmread(ref_dicom_path)
     new_ds = ref
     new_ds.PixelData = np_img.tobytes()
@@ -35,7 +35,3 @@ def tensor_to_dicom(tensor, ref_dicom_path, output_path, window_center=40, windo
     new_ds.save_as(output_path)
 
 
-#Beispielverwendung
-# Annahme: prediction = [1, 512, 512]
-#tensor = prediction.detach().cpu()
-#tensor_to_dicom(tensor, ref_dicom_path="original.dcm", output_path="sr_result.dcm")
